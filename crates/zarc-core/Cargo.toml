@@ -1,0 +1,24 @@
+[package]
+name = "zarc-core"
+description = "Zarc vault core: libsodium secretstream content encryption, versioned opaque container format, and vault key hierarchy."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+zeroize.workspace = true
+
+[build-dependencies]
+cc = "1.2"
+flate2 = "1.0"
+minisign-verify = "0.2"
+tar = "0.4"
+
+[dev-dependencies]
+crypto_secretstream = "0.2"
+proptest = "1.6"
+rand_core = { version = "0.6", features = ["getrandom"] }
+sha2 = "0.10"
+tempfile = "3"

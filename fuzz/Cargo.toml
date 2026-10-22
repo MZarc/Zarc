@@ -1,0 +1,36 @@
+[package]
+name = "zarc-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+zarc-core = { path = "../crates/zarc-core" }
+arbitrary = { version = "1", features = ["derive"] }
+
+[[bin]]
+name = "parse_container"
+path = "fuzz_targets/parse_container.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decrypt_stream"
+path = "fuzz_targets/decrypt_stream.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "wrap_key"
+path = "fuzz_targets/wrap_key.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]

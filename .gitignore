@@ -1,0 +1,35 @@
+# graft's local graph cache — regenerable, not committed (run `graft build`).
+/graft/
+
+# Rust build artefacts
+/target/
+**/*.rs.bk
+
+# Android / Gradle build artefacts
+/android/.gradle/
+/android/.kotlin/
+/android/build/
+/android/app/build/
+/android/local.properties
+/android/.idea/
+*.iml
+
+# Signing material is never committed.
+/android/keystore.properties
+/android/*.jks
+/android/*.keystore
+
+# The staged native libraries are build outputs of tools/build-android.ps1.
+# They are rebuilt from the Rust sources; they are not committed.
+/android/app/src/main/jniLibs/
+
+# Fuzzing artefacts
+/fuzz/target/
+/fuzz/artifacts/
+/fuzz/corpus/
+
+# Editors and operating system
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

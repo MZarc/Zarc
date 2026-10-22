@@ -1,0 +1,35 @@
+#!/bin/sh
+#
+# Zarc - Gradle startup script for POSIX systems.
+#
+# This is a compact, self contained launcher for the Gradle wrapper. It was
+# written by hand because `gradle wrapper` could not reach
+# services.gradle.org from the build environment. Running
+# `gradle wrapper --gradle-version 9.6.1` in an environment with network
+# access regenerates the official scripts.
+#
+
+set -e
+
+APP_HOME=$(cd "$(dirname "$0")" >/dev/null 2>&1 && pwd -P)
+CLASSPATH=$APP_HOME/gradle/wrapper/gradle-wrapper.jar
+
+if [ -n "$JAVA_HOME" ] ; then
+    JAVACMD=$JAVA_HOME/bin/java
+    if [ ! -x "$JAVACMD" ] ; then
+        echo "ERROR: JAVA_HOME is set to an invalid directory: $JAVA_HOME" >&2
+        exit 1
+    fi
+else
+    JAVACMD=java
+    if ! command -v java >/dev/null 2>&1 ; then
+        echo "ERROR: JAVA_HOME is not set and no 'java' command could be found in your PATH." >&2
+        exit 1
+    fi
+fi
+
+exec "$JAVACMD" \
+    $DEFAULT_JVM_OPTS $JAVA_OPTS $GRADLE_OPTS \
+    "-Dorg.gradle.appname=$(basename "$0")" \
+    -classpath "$CLASSPATH" \
+    org.gradle.wrapper.GradleWrapperMain "$@"

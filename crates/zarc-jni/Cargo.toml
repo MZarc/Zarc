@@ -1,0 +1,16 @@
+[package]
+name = "zarc-jni"
+description = "JNI bridge between the Zarc Android app and the Rust vault core."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+name = "zarc_jni"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+zarc-core.workspace = true
+jni = "0.21"
+zeroize.workspace = true

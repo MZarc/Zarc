@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    The paths that the gallery may hand to another application. Only the
+    cache directory with the decrypted export is exposed; the vault itself is
+    never shared.
+-->
+<paths>
+    <cache-path
+        name="exports"
+        path="exports/" />
+</paths>

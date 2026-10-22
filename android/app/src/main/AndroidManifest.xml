@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!--
+        Zarc declares no permissions at all:
+        * no INTERNET permission, so the app cannot send anything anywhere,
+        * no storage permissions: the vault lives in app-private storage and
+          imported documents are read through the Storage Access Framework,
+          which grants access to a single document without a permission.
+    -->
+
+    <application
+        android:allowBackup="false"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:fullBackupContent="false"
+        android:hasFragileUserData="false"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.Zarc"
+        android:usesCleartextTraffic="false">
+
+        <activity
+            android:name=".ui.GalleryActivity"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:windowSoftInputMode="adjustResize">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- The developer facing screen with the on-device tests. -->
+        <activity
+            android:name=".ui.SecurityLabActivity"
+            android:exported="false"
+            android:label="@string/lab_name" />
+
+        <!--
+            The gallery hands a decrypted copy to another application through
+            this provider, with a temporary, per-uri permission. Nothing is
+            written to a world readable location.
+        -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+    </application>
+</manifest>

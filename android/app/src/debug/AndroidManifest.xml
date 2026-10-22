@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    The debug manifest adds the reload receiver, so that the development
+    tooling can refresh the screen after a rebuild. It is not part of the
+    shipping application.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <receiver
+            android:name=".ui.ReloadReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.zarc.vault.action.RELOAD" />
+            </intent-filter>
+        </receiver>
+    </application>
+</manifest>
