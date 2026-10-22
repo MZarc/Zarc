@@ -73,23 +73,16 @@ Rounded family plus a hand-drawn import vector (`ZarcIcons.kt`).
 
 ## Security model
 
-```text
-        Android Keystore                     Vault master key (VMK)
-  ┌────────────────────────┐            ┌──────────────────────────┐
-  │ AES-256-GCM,           │  wraps     │ 256-bit, generated on    │
-  │ non-exportable,        │ ─────────► │ device, memory only,     │
-  │ hardware when possible │            │ wrapped at rest          │
-  └────────────────────────┘            └────────────┬─────────────┘
-                                                     │ wraps
-                                          ┌──────────▼─────────────┐
-                                          │ Per-object data key    │
-                                          │ 256-bit, one per file  │
-                                          └──────────┬─────────────┘
-                                                     │ encrypts
-                                          ┌──────────▼─────────────┐
-                                          │ XChaCha20-Poly1305     │
-                                          │ secretstream container │
-                                          └────────────────────────┘
+```mermaid
+flowchart TD
+    KEK["AES-256-GCM key<br/>Android Keystore · non-exportable<br/>hardware-backed when available"]
+    VMK["Vault master key (VMK)<br/>256-bit · memory only · wrapped at rest"]
+    DEK["Per-object data key<br/>256-bit · fresh for every file"]
+    OBJ["Opaque vault object<br/>XChaCha20-Poly1305 secretstream"]
+
+    KEK -->|"wraps / unwraps"| VMK
+    VMK -->|"wraps"| DEK
+    DEK -->|"encrypts"| OBJ
 ```
 
 | Property | How it is established |
@@ -125,40 +118,51 @@ Rationale, rejected alternatives and version pinning:
 
 ## Architecture
 
-```text
-┌───────────────────────────────────────────────────────────────────┐
-│ Kotlin · Jetpack Compose                                          │
-│   GalleryActivity / GalleryScreens / ViewerAndSettings            │
-│   GalleryViewModel        state, sort, filter, selection, split   │
-│   VaultRepository         paths, VMK lifecycle, media index       │
-│   KeystoreKeyManager      AES-256-GCM key, StrongBox, key report  │
-└──────────────────────────────┬────────────────────────────────────┘
-                               │ JNI: file paths and the VMK only
-┌──────────────────────────────▼────────────────────────────────────┐
-│ Rust · crates/zarc-core                                           │
-│   container   versioned, opaque object format                     │
-│   keywrap     VMK → DEK hierarchy                                 │
-│   vault       transactional, fail-closed encrypt / decrypt        │
-│   sodium      the only module with unsafe: a narrow libsodium FFI │
-└──────────────────────────────┬────────────────────────────────────┘
-                               │
-┌──────────────────────────────▼────────────────────────────────────┐
-│ libsodium 1.0.22 (vendored, signature verified at build time)     │
-│   secretstream XChaCha20-Poly1305 · AEAD XChaCha20-Poly1305-IETF  │
-└───────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TB
+    subgraph APP["Kotlin · Jetpack Compose"]
+        direction TB
+        UI["Gallery and viewer<br/>GalleryScreens · ViewerAndSettings"]
+        VM["GalleryViewModel<br/>state · sort · filter · selection · split"]
+        REPO["VaultRepository<br/>paths · VMK lifecycle · sealed index"]
+        KS["KeystoreKeyManager<br/>AES-256-GCM · StrongBox · key report"]
+        UI --> VM --> REPO
+        REPO --- KS
+    end
+
+    subgraph CORE["Rust · crates/zarc-core"]
+        direction TB
+        VAULT["vault<br/>transactional, fail-closed encrypt / decrypt"]
+        CONT["container<br/>versioned opaque object format"]
+        WRAP["keywrap<br/>VMK to DEK hierarchy"]
+        SOD["sodium<br/>the only unsafe module: narrow FFI"]
+        VAULT --> CONT
+        VAULT --> WRAP
+        CONT --> SOD
+        WRAP --> SOD
+    end
+
+    subgraph LIB["libsodium 1.0.22 · vendored, signature verified at build"]
+        STREAM["secretstream<br/>XChaCha20-Poly1305"]
+        AEAD["AEAD<br/>XChaCha20-Poly1305-IETF"]
+    end
+
+    REPO -->|"JNI: file paths + VMK only"| VAULT
+    SOD --> STREAM
+    SOD --> AEAD
 ```
 
 **Repository layout**
 
-```text
-crates/zarc-core/       Rust crypto, container format, key hierarchy, vault
-crates/zarc-jni/         JNI bridge to the Android application
-android/                 Gradle project: Compose UI + instrumented tests
-fuzz/                    cargo-fuzz targets for parser, stream and envelope
-third_party/libsodium/   vendored, signed upstream release
-tools/                   build, verify, watch, audit and device-audit scripts
-docs/                    threat model, crypto decisions, ADRs, validation
-```
+| Path | Contents |
+|------|----------|
+| `crates/zarc-core/` | Rust crypto, container format, key hierarchy, vault |
+| `crates/zarc-jni/` | JNI bridge to the Android application |
+| `android/` | Gradle project: Compose UI + instrumented tests |
+| `fuzz/` | cargo-fuzz targets for parser, stream and envelope |
+| `third_party/libsodium/` | vendored, signed upstream release |
+| `tools/` | build, verify, watch, audit and device-audit scripts |
+| `docs/` | threat model, crypto decisions, ADRs, validation |
 
 ## Requirements
 
