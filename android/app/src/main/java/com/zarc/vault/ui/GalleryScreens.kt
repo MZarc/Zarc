@@ -1,9 +1,24 @@
 package com.zarc.vault.ui
 
+import android.app.DatePickerDialog
+import android.app.TimePickerDialog
+import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.rememberTransformableState
+import androidx.compose.foundation.gestures.transformable
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -56,11 +71,15 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -69,7 +88,9 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -77,7 +98,10 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.zarc.vault.gallery.Album
 import com.zarc.vault.gallery.GalleryRepository
 import com.zarc.vault.gallery.MediaItem
+import com.zarc.vault.gallery.VaultIndex
 import com.zarc.vault.ui.theme.ZarcPalette
+import java.util.Calendar
+import kotlinx.coroutines.flow.distinctUntilChanged
 
 /** The corner radius of a media cell. */
 private val CellShape = RoundedCornerShape(8.dp)
@@ -108,6 +132,16 @@ private fun formatDuration(milliseconds: Long): String {
  * The gallery shell: one action bar on top, the content of the active section
  * in the middle and a floating navigation bar over the content.
  */
+/** The item or the selection that an edit dialog is acting on. */
+private data class EditTarget(
+    val ids: List<String>,
+    val initialName: String,
+    val initialDate: Long,
+    val isPrivate: Boolean,
+    val selectionMode: Boolean,
+    val item: MediaItem? = null,
+)
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun GalleryApp(
@@ -119,33 +153,54 @@ fun GalleryApp(
     val state by viewModel.state.collectAsStateWithLifecycle()
     var optionsOpen by remember { mutableStateOf(false) }
     var menuOpen by remember { mutableStateOf(false) }
+    var editOpen by remember { mutableStateOf(false) }
     var moveDialog by remember { mutableStateOf(false) }
     var newAlbum by remember { mutableStateOf(false) }
+    var renameTarget by remember { mutableStateOf<EditTarget?>(null) }
+    var dateTarget by remember { mutableStateOf<EditTarget?>(null) }
 
     val tab = state.tab
-    val title = when (tab) {
-        GalleryTab.PHOTOS -> state.filter.title
-        GalleryTab.ALBUMS -> "Albums"
-        GalleryTab.PRIVATE -> "Private"
-        GalleryTab.BIN -> "Bin"
-        GalleryTab.SETTINGS -> "Settings"
+    val openAlbum = state.albumId?.let { id -> state.index.albums.firstOrNull { it.id == id } }
+    val albumOpen = tab == GalleryTab.ALBUMS && openAlbum != null
+    val title = when {
+        albumOpen -> openAlbum.name
+        tab == GalleryTab.PHOTOS -> state.filter.title
+        tab == GalleryTab.ALBUMS -> "Albums"
+        tab == GalleryTab.PRIVATE -> "Private"
+        tab == GalleryTab.BIN -> "Bin"
+        else -> "Settings"
     }
-    val subtitle = when (tab) {
-        GalleryTab.PHOTOS -> plural(state.roll.size, "item")
-        GalleryTab.ALBUMS -> plural(state.index.albums.size, "album")
-        GalleryTab.PRIVATE -> when {
+    val subtitle = when {
+        albumOpen -> plural(state.albumItems.size, "item")
+        tab == GalleryTab.PHOTOS -> plural(state.roll.size, "item")
+        tab == GalleryTab.ALBUMS -> plural(state.index.albums.size, "album")
+        tab == GalleryTab.PRIVATE -> when {
             !state.privateAvailable -> "Not set up yet"
             state.privateUnlocked -> plural(state.privateItems.size, "item")
             else -> "Protected by the device authentication"
         }
-        GalleryTab.BIN -> plural(state.binnedItems.size, "item")
-        GalleryTab.SETTINGS -> "Vault, security and recovery"
+        tab == GalleryTab.BIN -> plural(state.binnedItems.size, "item")
+        else -> "Vault, security and recovery"
     }
-    val selectableIds = when (tab) {
-        GalleryTab.PHOTOS -> state.roll.map { it.id }
-        GalleryTab.PRIVATE -> state.privateItems.map { it.id }
-        GalleryTab.BIN -> state.binnedItems.map { it.id }
+    val selectableIds = when {
+        albumOpen -> state.albumItems.map { it.id }
+        tab == GalleryTab.PHOTOS -> state.roll.map { it.id }
+        tab == GalleryTab.PRIVATE -> state.privateItems.map { it.id }
+        tab == GalleryTab.BIN -> state.binnedItems.map { it.id }
         else -> emptyList()
+    }
+    val editable = tab == GalleryTab.PHOTOS || albumOpen || tab == GalleryTab.PRIVATE
+
+    // Requirement: back always returns to the roll, from the viewer, an album,
+    // the private area, the bin, the settings or the search.
+    BackHandler(
+        enabled = state.viewerItem != null ||
+            tab != GalleryTab.PHOTOS ||
+            state.albumId != null ||
+            state.selecting ||
+            state.searchOpen,
+    ) {
+        viewModel.goHome()
     }
 
     Box(Modifier.fillMaxSize()) {
@@ -170,8 +225,14 @@ fun GalleryApp(
                     } else {
                         null
                     },
-                    onMove = if (tab == GalleryTab.PHOTOS) {
-                        { moveDialog = true }
+                    onFavorite = if (editable && tab != GalleryTab.PRIVATE) {
+                        viewModel::toggleSelectionFavorite
+                    } else {
+                        null
+                    },
+                    selectionAllFavorite = state.selectionAllFavorite,
+                    onEdit = if (editable) {
+                        { editOpen = true }
                     } else {
                         null
                     },
@@ -185,8 +246,8 @@ fun GalleryApp(
                     onToggleSearch = if (tab == GalleryTab.SETTINGS) null else viewModel::toggleSearch,
                     query = state.query,
                     onQuery = viewModel::setQuery,
-                    onBack = if (!tab.isNavDestination) {
-                        { viewModel.selectTab(GalleryTab.PHOTOS) }
+                    onBack = if (tab != GalleryTab.PHOTOS || state.albumId != null) {
+                        { viewModel.goHome() }
                     } else {
                         null
                     },
@@ -210,14 +271,16 @@ fun GalleryApp(
             modifier = Modifier.align(Alignment.BottomCenter),
         )
 
-        if (tab.isNavDestination && !state.selecting) {
-            ImportButton(
-                onClick = onImport,
-                modifier = Modifier
-                    .align(Alignment.BottomEnd)
-                    .navigationBarsPadding()
-                    .padding(end = 20.dp, bottom = 104.dp),
-            )
+        AnimatedVisibility(
+            visible = tab.isNavDestination && !state.selecting,
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .navigationBarsPadding()
+                .padding(end = 20.dp, bottom = 104.dp),
+            enter = fadeIn() + scaleIn(initialScale = 0.85f),
+            exit = fadeOut() + scaleOut(targetScale = 0.85f),
+        ) {
+            ImportButton(onClick = onImport)
         }
 
         // The viewer covers everything, including the floating bar.
@@ -246,6 +309,29 @@ fun GalleryApp(
                         viewModel.closeViewer()
                     },
                     onReencrypt = { viewModel.reencrypt(item) },
+                    onRename = {
+                        renameTarget = EditTarget(
+                            ids = listOf(item.id),
+                            initialName = item.name,
+                            initialDate = item.takenAt,
+                            isPrivate = item.isPrivate,
+                            selectionMode = false,
+                            item = item,
+                        )
+                    },
+                    onEditDate = {
+                        dateTarget = EditTarget(
+                            ids = listOf(item.id),
+                            initialName = item.name,
+                            initialDate = item.takenAt,
+                            isPrivate = item.isPrivate,
+                            selectionMode = false,
+                            item = item,
+                        )
+                    },
+                    onToggleFavorite = {
+                        viewModel.setItemFavorite(item, !item.isFavorite)
+                    },
                 )
             }
         }
@@ -275,6 +361,39 @@ fun GalleryApp(
             onImportSamples = viewModel::importSamples,
         )
     }
+    if (editOpen) {
+        SelectionEditSheet(
+            count = state.selection.size,
+            canMove = tab != GalleryTab.PRIVATE,
+            onDismiss = { editOpen = false },
+            onRename = {
+                editOpen = false
+                val first = state.index.find(state.selection.firstOrNull().orEmpty()) ?: state.privateIndex.find(state.selection.firstOrNull().orEmpty())
+                renameTarget = EditTarget(
+                    ids = state.selection.toList(),
+                    initialName = if (state.selection.size == 1) first?.name.orEmpty() else "",
+                    initialDate = first?.takenAt ?: System.currentTimeMillis(),
+                    isPrivate = tab == GalleryTab.PRIVATE,
+                    selectionMode = true,
+                )
+            },
+            onEditDate = {
+                editOpen = false
+                val first = state.index.find(state.selection.firstOrNull().orEmpty()) ?: state.privateIndex.find(state.selection.firstOrNull().orEmpty())
+                dateTarget = EditTarget(
+                    ids = state.selection.toList(),
+                    initialName = first?.name.orEmpty(),
+                    initialDate = first?.takenAt ?: System.currentTimeMillis(),
+                    isPrivate = tab == GalleryTab.PRIVATE,
+                    selectionMode = true,
+                )
+            },
+            onMove = {
+                editOpen = false
+                moveDialog = true
+            },
+        )
+    }
     if (moveDialog) {
         AlbumPickerDialog(
             title = "Move to album",
@@ -297,6 +416,40 @@ fun GalleryApp(
             },
         )
     }
+    renameTarget?.let { target ->
+        NameDialog(
+            title = if (target.ids.size == 1) "Rename item" else "Rename ${target.ids.size} items",
+            initial = target.initialName,
+            hint = if (target.ids.size > 1) {
+                "A number is added before the extension of each item."
+            } else {
+                null
+            },
+            onDismiss = { renameTarget = null },
+            onConfirm = { name ->
+                if (target.selectionMode) {
+                    viewModel.renameSelection(name)
+                } else {
+                    target.item?.let { viewModel.renameItem(it, name) }
+                }
+                renameTarget = null
+            },
+        )
+    }
+    dateTarget?.let { target ->
+        DateTimeDialog(
+            initial = target.initialDate,
+            onDismiss = { dateTarget = null },
+            onConfirm = { timestamp ->
+                if (target.selectionMode) {
+                    viewModel.setSelectionTakenAt(timestamp)
+                } else {
+                    target.item?.let { viewModel.setItemTakenAt(it, timestamp) }
+                }
+                dateTarget = null
+            },
+        )
+    }
 }
 
 /** The action bar of a section; it turns into a selection bar when items are selected. */
@@ -307,7 +460,9 @@ private fun GalleryTopBar(
     selection: Set<String>,
     onClearSelection: () -> Unit,
     onSelectAll: (() -> Unit)?,
-    onMove: (() -> Unit)?,
+    onFavorite: (() -> Unit)?,
+    selectionAllFavorite: Boolean,
+    onEdit: (() -> Unit)?,
     onRestore: (() -> Unit)?,
     onDelete: (() -> Unit)?,
     searchOpen: Boolean,
@@ -351,7 +506,14 @@ private fun GalleryTopBar(
             }
             if (selecting) {
                 onSelectAll?.let { TopBarAction(ZarcIcons.SelectAll, "Select all", it) }
-                onMove?.let { TopBarAction(ZarcIcons.Move, "Move", it) }
+                onFavorite?.let {
+                    TopBarAction(
+                        icon = if (selectionAllFavorite) ZarcIcons.Star else ZarcIcons.StarBorder,
+                        label = if (selectionAllFavorite) "Remove from favourites" else "Add to favourites",
+                        onClick = it,
+                    )
+                }
+                onEdit?.let { TopBarAction(ZarcIcons.Edit, "Edit", it) }
                 onRestore?.let { TopBarAction(ZarcIcons.Restore, "Restore", it) }
                 onDelete?.let { TopBarAction(ZarcIcons.Delete, "Delete", it) }
                 TopBarAction(ZarcIcons.Close, "Clear the selection", onClearSelection)
@@ -553,10 +715,14 @@ fun PhotosScreen(state: GalleryUiState, viewModel: GalleryViewModel) {
         )
     } else {
         MediaGrid(
-            items = state.roll,
+            items = state.visibleRoll,
             repository = viewModel.repository,
             isPrivate = false,
             selection = state.selection,
+            columns = state.gridColumns,
+            hasMore = state.hasMore,
+            onColumnsChange = viewModel::setGridColumns,
+            onLoadMore = viewModel::loadMore,
             onClick = { item ->
                 if (state.selecting) viewModel.toggleSelection(item.id)
                 else viewModel.openViewer(item)
@@ -573,20 +739,62 @@ fun MediaGrid(
     repository: GalleryRepository,
     isPrivate: Boolean,
     selection: Set<String>,
+    columns: Int,
+    hasMore: Boolean,
+    onColumnsChange: (Int) -> Unit,
+    onLoadMore: () -> Unit,
     onClick: (MediaItem) -> Unit,
     onLongClick: (MediaItem) -> Unit,
 ) {
+    val gridState = rememberLazyGridState()
+    val currentColumns by rememberUpdatedState(columns)
+    var pinchZoom by remember { mutableFloatStateOf(1f) }
+
+    LaunchedEffect(gridState, items.size, hasMore) {
+        snapshotFlow { gridState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1 }
+            .distinctUntilChanged()
+            .collect { last ->
+                if (hasMore && last >= items.size - 9) onLoadMore()
+            }
+    }
+    LaunchedEffect(columns) {
+        pinchZoom = 1f
+    }
+
+    val transform = rememberTransformableState { zoomChange, _, _ ->
+        val next = pinchZoom * zoomChange
+        when {
+            next >= 1.3f -> {
+                onColumnsChange((currentColumns + 1).coerceAtMost(6))
+                pinchZoom = 1f
+            }
+            next <= 0.77f -> {
+                onColumnsChange((currentColumns - 1).coerceAtLeast(2))
+                pinchZoom = 1f
+            }
+            else -> pinchZoom = next
+        }
+    }
+
     LazyVerticalGrid(
-        columns = GridCells.Fixed(3),
-        modifier = Modifier.fillMaxSize(),
+        columns = GridCells.Fixed(columns),
+        state = gridState,
+        modifier = Modifier
+            .fillMaxSize()
+            .transformable(transform),
         contentPadding = PaddingValues(start = 2.dp, end = 2.dp, bottom = FloatingBarRoom),
         horizontalArrangement = Arrangement.spacedBy(2.dp),
         verticalArrangement = Arrangement.spacedBy(2.dp),
     ) {
         items(items, key = { it.id }) { item ->
             val selected = item.id in selection
+            val selectedAlpha by animateFloatAsState(
+                targetValue = if (selected) 1f else 0f,
+                label = "selection",
+            )
             Box(
                 modifier = Modifier
+                    .animateItem()
                     .aspectRatio(1f)
                     .clip(CellShape)
                     .combinedClickable(
@@ -627,28 +835,33 @@ fun MediaGrid(
                         }
                     }
                 }
-                if (selected) {
-                    Box(
-                        Modifier
-                            .fillMaxSize()
-                            .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.32f)),
+                Box(
+                    Modifier
+                        .fillMaxSize()
+                        .background(
+                            MaterialTheme.colorScheme.primary.copy(alpha = 0.32f * selectedAlpha),
+                        ),
+                )
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(6.dp)
+                        .size(22.dp)
+                        .graphicsLayer {
+                            alpha = selectedAlpha
+                            scaleX = 0.75f + 0.25f * selectedAlpha
+                            scaleY = 0.75f + 0.25f * selectedAlpha
+                        }
+                        .clip(CircleShape)
+                        .background(MaterialTheme.colorScheme.primary),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        imageVector = ZarcIcons.Check,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onPrimary,
+                        modifier = Modifier.size(15.dp),
                     )
-                    Box(
-                        modifier = Modifier
-                            .align(Alignment.TopEnd)
-                            .padding(6.dp)
-                            .size(22.dp)
-                            .clip(CircleShape)
-                            .background(MaterialTheme.colorScheme.primary),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Icon(
-                            imageVector = ZarcIcons.Check,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.onPrimary,
-                            modifier = Modifier.size(15.dp),
-                        )
-                    }
                 }
             }
         }
@@ -659,6 +872,38 @@ fun MediaGrid(
 @Composable
 fun AlbumsScreen(state: GalleryUiState, viewModel: GalleryViewModel) {
     var renaming by remember { mutableStateOf<Album?>(null) }
+    val openAlbum = state.albumId?.let { id -> state.index.albums.firstOrNull { it.id == id } }
+
+    if (openAlbum != null) {
+        if (state.albumItems.isEmpty()) {
+            EmptyState(
+                title = if (state.query.isEmpty()) "This album is empty" else "Nothing found",
+                subtitle = if (state.query.isEmpty()) {
+                    "Add media to it with Edit > Move to album."
+                } else {
+                    "No item matches \"${state.query}\"."
+                },
+            )
+        } else {
+            MediaGrid(
+                items = state.visibleAlbumItems,
+                repository = viewModel.repository,
+                isPrivate = false,
+                selection = state.selection,
+                columns = state.gridColumns,
+                hasMore = state.hasMore,
+                onColumnsChange = viewModel::setGridColumns,
+                onLoadMore = viewModel::loadMore,
+                onClick = { item ->
+                    if (state.selecting) viewModel.toggleSelection(item.id)
+                    else viewModel.openViewer(item)
+                },
+                onLongClick = { viewModel.toggleSelection(it.id) },
+            )
+        }
+        return
+    }
+
     val needle = state.query.trim()
     val albums = state.index.albums.filter {
         needle.isEmpty() || it.name.contains(needle, ignoreCase = true)
@@ -688,9 +933,9 @@ fun AlbumsScreen(state: GalleryUiState, viewModel: GalleryViewModel) {
                     count = members.size,
                     cover = members.firstOrNull(),
                     repository = viewModel.repository,
-                    onClick = { members.firstOrNull()?.let(viewModel::openViewer) },
-                    onLongClick = { renaming = album },
-                    onRename = { renaming = album },
+                    onClick = { viewModel.openAlbum(album.id) },
+                    onLongClick = if (album.system) null else ({ renaming = album }),
+                    onRename = if (album.system) null else ({ renaming = album }),
                 )
             }
         }
@@ -717,15 +962,15 @@ private fun AlbumCard(
     cover: MediaItem?,
     repository: GalleryRepository,
     onClick: () -> Unit,
-    onLongClick: () -> Unit,
-    onRename: () -> Unit,
+    onLongClick: (() -> Unit)?,
+    onRename: (() -> Unit)?,
 ) {
     Card(
         modifier = Modifier
             .fillMaxWidth()
             .combinedClickable(
                 onClick = { onClick() },
-                onLongClick = { onLongClick() },
+                onLongClick = onLongClick,
             ),
         shape = RoundedCornerShape(16.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
@@ -747,9 +992,17 @@ private fun AlbumCard(
                     )
                 } else {
                     Icon(
-                        imageVector = ZarcIcons.Albums,
+                        imageVector = if (album.id == VaultIndex.ALBUM_FAVOURITES) {
+                            ZarcIcons.Star
+                        } else {
+                            ZarcIcons.Albums
+                        },
                         contentDescription = null,
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        tint = if (album.id == VaultIndex.ALBUM_FAVOURITES) {
+                            ZarcPalette.favourite
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        },
                         modifier = Modifier.align(Alignment.Center).size(32.dp),
                     )
                 }
@@ -773,8 +1026,10 @@ private fun AlbumCard(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-                IconButton(onClick = onRename) {
-                    Icon(ZarcIcons.MoreVert, contentDescription = "Rename the album")
+                if (onRename != null) {
+                    IconButton(onClick = onRename) {
+                        Icon(ZarcIcons.MoreVert, contentDescription = "Rename the album")
+                    }
                 }
             }
         }
@@ -829,10 +1084,14 @@ fun PrivateScreen(
         )
 
         else -> MediaGrid(
-            items = state.privateItems,
+            items = state.visiblePrivateItems,
             repository = viewModel.repository,
             isPrivate = true,
             selection = state.selection,
+            columns = state.gridColumns,
+            hasMore = state.hasMore,
+            onColumnsChange = viewModel::setGridColumns,
+            onLoadMore = viewModel::loadMore,
             onClick = { item ->
                 if (state.selecting) viewModel.toggleSelection(item.id)
                 else viewModel.openViewer(item)
@@ -849,10 +1108,14 @@ fun BinScreen(state: GalleryUiState, viewModel: GalleryViewModel) {
         EmptyState("The bin is empty", "Deleted items stay here until you empty the bin.")
     } else {
         MediaGrid(
-            items = state.binnedItems,
+            items = state.visibleBinnedItems,
             repository = viewModel.repository,
             isPrivate = false,
             selection = state.selection,
+            columns = state.gridColumns,
+            hasMore = state.hasMore,
+            onColumnsChange = viewModel::setGridColumns,
+            onLoadMore = viewModel::loadMore,
             onClick = { viewModel.toggleSelection(it.id) },
             onLongClick = { viewModel.toggleSelection(it.id) },
         )
@@ -951,22 +1214,68 @@ private fun OptionsSheet(
             }
 
             GalleryTab.ALBUMS -> {
-                SheetHeader("Albums", plural(state.index.albums.size, "album"))
-                SheetAction(
-                    icon = ZarcIcons.Add,
-                    title = "New album",
-                    subtitle = "Group the media of the vault",
-                    onClick = onNewAlbum,
-                )
-                SheetAction(
-                    icon = ZarcIcons.Import,
-                    title = "Import media",
-                    subtitle = "Add pictures and videos to the vault",
-                    onClick = {
-                        onDismiss()
-                        onImport()
-                    },
-                )
+                val album = state.albumId?.let { id -> state.index.albums.firstOrNull { it.id == id } }
+                if (album != null) {
+                    SheetHeader(album.name, plural(state.albumItems.size, "item"))
+                    SheetLabel("Sort by")
+                    MediaSort.entries.forEach { sort ->
+                        SheetAction(
+                            icon = ZarcIcons.Sort,
+                            title = sort.title,
+                            selected = state.sort == sort,
+                            onClick = {
+                                viewModel.setSort(sort)
+                                onDismiss()
+                            },
+                        )
+                    }
+                    Spacer(Modifier.height(6.dp))
+                    SheetLabel("Show")
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 10.dp, vertical = 2.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        MediaFilter.entries.forEach { entry ->
+                            FilterChip(
+                                selected = state.filter == entry,
+                                onClick = {
+                                    viewModel.setFilter(entry)
+                                    onDismiss()
+                                },
+                                label = { Text(entry.title) },
+                            )
+                        }
+                    }
+                    SheetDivider()
+                    SheetAction(
+                        icon = ZarcIcons.SelectAll,
+                        title = "Select all",
+                        subtitle = "Pick every visible item",
+                        onClick = {
+                            viewModel.selectAll(state.albumItems.map { it.id })
+                            onDismiss()
+                        },
+                    )
+                } else {
+                    SheetHeader("Albums", plural(state.index.albums.size, "album"))
+                    SheetAction(
+                        icon = ZarcIcons.Add,
+                        title = "New album",
+                        subtitle = "Group the media of the vault",
+                        onClick = onNewAlbum,
+                    )
+                    SheetAction(
+                        icon = ZarcIcons.Import,
+                        title = "Import media",
+                        subtitle = "Add pictures and videos to the vault",
+                        onClick = {
+                            onDismiss()
+                            onImport()
+                        },
+                    )
+                }
             }
 
             GalleryTab.PRIVATE -> {
@@ -1252,6 +1561,7 @@ internal fun SheetAction(
 fun NameDialog(
     title: String,
     initial: String,
+    hint: String? = null,
     onDismiss: () -> Unit,
     onConfirm: (String) -> Unit,
 ) {
@@ -1260,11 +1570,21 @@ fun NameDialog(
         onDismissRequest = onDismiss,
         title = { Text(title) },
         text = {
-            OutlinedTextField(
-                value = value,
-                onValueChange = { value = it },
-                singleLine = true,
-            )
+            Column {
+                OutlinedTextField(
+                    value = value,
+                    onValueChange = { value = it },
+                    singleLine = true,
+                )
+                if (hint != null) {
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        text = hint,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
         },
         confirmButton = {
             TextButton(onClick = { if (value.isNotBlank()) onConfirm(value.trim()) }) {
@@ -1303,4 +1623,105 @@ fun AlbumPickerDialog(
         },
         confirmButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
+}
+
+/** The sheet that groups the edit actions of a selection. */
+@Composable
+private fun SelectionEditSheet(
+    count: Int,
+    canMove: Boolean,
+    onDismiss: () -> Unit,
+    onRename: () -> Unit,
+    onEditDate: () -> Unit,
+    onMove: () -> Unit,
+) {
+    ZarcSheet(onDismiss = onDismiss) {
+        SheetHeader("Edit", plural(count, "item"))
+        SheetAction(
+            icon = ZarcIcons.Edit,
+            title = "Rename",
+            subtitle = if (count == 1) "Change the display name" else "Number the selected names",
+            onClick = onRename,
+        )
+        SheetAction(
+            icon = ZarcIcons.DateRange,
+            title = "Date and time",
+            subtitle = "Change when the media was captured",
+            onClick = onEditDate,
+        )
+        if (canMove) {
+            SheetAction(
+                icon = ZarcIcons.Move,
+                title = "Move to album",
+                subtitle = "Group the selected items",
+                onClick = onMove,
+            )
+        }
+    }
+}
+
+/** A native date picker followed by a native time picker. */
+@Composable
+fun DateTimeDialog(
+    initial: Long,
+    onDismiss: () -> Unit,
+    onConfirm: (Long) -> Unit,
+) {
+    val context = LocalContext.current
+    val seed = remember(initial) {
+        Calendar.getInstance().apply {
+            timeInMillis = if (initial > 0L) initial else System.currentTimeMillis()
+        }
+    }
+    DisposableEffect(context, seed) {
+        var finished = false
+        var timeDialog: TimePickerDialog? = null
+        fun cancel() {
+            if (!finished) {
+                finished = true
+                onDismiss()
+            }
+        }
+        fun confirm(timestamp: Long) {
+            if (!finished) {
+                finished = true
+                onConfirm(timestamp)
+            }
+        }
+        val chosen = (seed.clone() as Calendar)
+        val dateDialog = DatePickerDialog(
+            context,
+            { _, year, month, day ->
+                chosen.set(Calendar.YEAR, year)
+                chosen.set(Calendar.MONTH, month)
+                chosen.set(Calendar.DAY_OF_MONTH, day)
+                timeDialog = TimePickerDialog(
+                    context,
+                    { _, hour, minute ->
+                        chosen.set(Calendar.HOUR_OF_DAY, hour)
+                        chosen.set(Calendar.MINUTE, minute)
+                        chosen.set(Calendar.SECOND, 0)
+                        chosen.set(Calendar.MILLISECOND, 0)
+                        confirm(chosen.timeInMillis)
+                    },
+                    chosen.get(Calendar.HOUR_OF_DAY),
+                    chosen.get(Calendar.MINUTE),
+                    true,
+                ).apply {
+                    setOnCancelListener { cancel() }
+                    show()
+                }
+            },
+            chosen.get(Calendar.YEAR),
+            chosen.get(Calendar.MONTH),
+            chosen.get(Calendar.DAY_OF_MONTH),
+        )
+        dateDialog.setOnCancelListener { cancel() }
+        dateDialog.show()
+        onDispose {
+            dateDialog.dismiss()
+            timeDialog?.dismiss()
+            finished = true
+        }
+    }
 }

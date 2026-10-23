@@ -8,9 +8,11 @@ import androidx.compose.material.icons.automirrored.rounded.OpenInNew
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.DateRange
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.DeleteSweep
+import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.Info
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.Menu
@@ -18,12 +20,15 @@ import androidx.compose.material.icons.rounded.MoreHoriz
 import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.PhotoAlbum
 import androidx.compose.material.icons.rounded.PhotoLibrary
+import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Restore
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.SelectAll
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.Shield
+import androidx.compose.material.icons.rounded.Star
+import androidx.compose.material.icons.rounded.StarBorder
 import androidx.compose.material.icons.rounded.SwapHoriz
 import androidx.compose.material.icons.rounded.SwapVert
 import androidx.compose.material.icons.rounded.Tune
@@ -101,6 +106,10 @@ internal object ZarcIcons {
     val Move = Icons.AutoMirrored.Rounded.DriveFileMove
     val Restore = Icons.Rounded.Restore
     val Delete = Icons.Rounded.Delete
+    val Edit = Icons.Rounded.Edit
+    val DateRange = Icons.Rounded.DateRange
+    val Star = Icons.Rounded.Star
+    val StarBorder = Icons.Rounded.StarBorder
 
     val Split = Icons.Rounded.VerticalSplit
     val Swap = Icons.Rounded.SwapHoriz
@@ -109,5 +118,6 @@ internal object ZarcIcons {
     val Info = Icons.Rounded.Info
 
     val Play = Icons.Rounded.PlayArrow
+    val Pause = Icons.Rounded.Pause
     val Video = Icons.Rounded.Videocam
 }

@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.zarc.vault.core.ZarcNative
+import com.zarc.vault.gallery.Album
 import com.zarc.vault.gallery.GalleryRepository
 import com.zarc.vault.gallery.VaultIndex
 import org.junit.After
@@ -191,9 +192,61 @@ class GalleryInstrumentedTest {
     }
 
     @Test
-    fun theSystemAlbumsExistOnAFreshVault() {
+    fun theFavouriteAlbumExistsOnAFreshVault() {
         val index = gallery.loadIndex()
-        assertTrue(index.albums.any { it.id == VaultIndex.ALBUM_CAMERA })
-        assertTrue(index.albums.any { it.id == VaultIndex.ALBUM_IMPORTED })
+        assertEquals(1, index.albums.size)
+        assertTrue(index.albums.any { it.id == VaultIndex.ALBUM_FAVOURITES })
+    }
+
+    @Test
+    fun theFavouriteAlbumMarksAndReleasesItems() {
+        val id = gallery.importSamples(1).first()
+
+        gallery.setFavorite(listOf(id), true)
+        val favourite = gallery.loadIndex().find(id)!!
+        assertTrue(favourite.isFavorite)
+        assertEquals(VaultIndex.ALBUM_FAVOURITES, favourite.albumId)
+        assertEquals(1, gallery.loadIndex().inAlbum(VaultIndex.ALBUM_FAVOURITES).size)
+
+        gallery.setFavorite(listOf(id), false)
+        val released = gallery.loadIndex().find(id)!!
+        assertFalse(released.isFavorite)
+        assertEquals(VaultIndex.ALBUM_NONE, released.albumId)
+        assertTrue(gallery.loadIndex().inAlbum(VaultIndex.ALBUM_FAVOURITES).isEmpty())
+    }
+
+    @Test
+    fun renamingKeepsTheExtensionAndNumbersABatch() {
+        val ids = gallery.importSamples(2)
+
+        gallery.renameItems(ids.take(1), "Trip.jpg")
+        assertEquals("Trip.jpg", gallery.loadIndex().find(ids.first())!!.name)
+
+        gallery.renameItems(ids, "Day.jpg")
+        val names = gallery.loadIndex().items.map { it.name }
+        assertTrue(names.contains("Day 1.jpg"))
+        assertTrue(names.contains("Day 2.jpg"))
+    }
+
+    @Test
+    fun theCaptureDateCanBeChanged() {
+        val id = gallery.importSamples(1).first()
+        val timestamp = 1_700_000_000_000L
+        gallery.setTakenAt(listOf(id), timestamp)
+        assertEquals(timestamp, gallery.loadIndex().find(id)!!.takenAt)
+    }
+
+    @Test
+    fun theLegacySystemAlbumsAreMigratedToTheRoll() {
+        gallery.importSamples(1)
+        val legacy = gallery.loadIndex()
+        legacy.albums.add(Album("camera", "Camera", system = true))
+        legacy.items.replaceAll { it.copy(albumId = "camera") }
+        gallery.saveIndex(legacy)
+
+        val migrated = gallery.loadIndex()
+        assertEquals(1, migrated.albums.size)
+        assertTrue(migrated.albums.any { it.id == VaultIndex.ALBUM_FAVOURITES })
+        assertEquals(VaultIndex.ALBUM_NONE, migrated.items.first().albumId)
     }
 }

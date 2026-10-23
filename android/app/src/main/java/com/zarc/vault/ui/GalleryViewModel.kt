@@ -64,6 +64,9 @@ enum class MediaSort(val title: String) {
     SIZE("Largest first"),
 }
 
+/** How many items are materialised in a grid before more are requested. */
+private const val PAGE_SIZE = 240
+
 /** Apply the search query to a list of media. */
 private fun List<MediaItem>.matching(query: String): List<MediaItem> {
     val needle = query.trim().lowercase()
@@ -103,6 +106,12 @@ data class GalleryUiState(
     val splitMode: Boolean = false,
     /** The second item of the split viewer. */
     val splitItem: MediaItem? = null,
+    /** The album that is open inside the albums section, or null for the list. */
+    val albumId: String? = null,
+    /** The number of items currently materialised in a grid. */
+    val pageLimit: Int = PAGE_SIZE,
+    /** The number of columns of the media grid, between 2 and 6. */
+    val gridColumns: Int = 3,
     /** Whether the private area is unlocked. */
     val privateUnlocked: Boolean = false,
     /** Whether the private area has been set up. */
@@ -123,6 +132,21 @@ data class GalleryUiState(
             return filtered.matching(query).orderedBy(sort)
         }
 
+    /** The items of the open album after the filter and the search. */
+    val albumItems: List<MediaItem>
+        get() = albumId?.let { id ->
+            index.inAlbum(id)
+                .filter { item ->
+                    when (filter) {
+                        MediaFilter.ALL -> true
+                        MediaFilter.PHOTOS -> !item.isVideo
+                        MediaFilter.VIDEOS -> item.isVideo
+                    }
+                }
+                .matching(query)
+                .orderedBy(sort)
+        } ?: emptyList()
+
     /** The items of the private area. */
     val privateItems: List<MediaItem>
         get() = privateIndex.visible.matching(query).orderedBy(sort)
@@ -131,12 +155,41 @@ data class GalleryUiState(
     val binnedItems: List<MediaItem>
         get() = index.deleted.matching(query).orderedBy(sort)
 
+    /** The roll, materialised up to the current page limit. */
+    val visibleRoll: List<MediaItem> get() = roll.take(pageLimit)
+
+    /** The open album, materialised up to the current page limit. */
+    val visibleAlbumItems: List<MediaItem> get() = albumItems.take(pageLimit)
+
+    /** The private items, materialised up to the current page limit. */
+    val visiblePrivateItems: List<MediaItem> get() = privateItems.take(pageLimit)
+
+    /** The binned items, materialised up to the current page limit. */
+    val visibleBinnedItems: List<MediaItem> get() = binnedItems.take(pageLimit)
+
+    /** The number of items in the current section, across every page. */
+    val activeTotal: Int
+        get() = when (tab) {
+            GalleryTab.PHOTOS -> roll.size
+            GalleryTab.ALBUMS -> if (albumId != null) albumItems.size else 0
+            GalleryTab.PRIVATE -> privateItems.size
+            GalleryTab.BIN -> binnedItems.size
+            GalleryTab.SETTINGS -> 0
+        }
+
+    /** Whether another page can be requested. */
+    val hasMore: Boolean get() = activeTotal > pageLimit
+
     /** The items the split viewer can offer for the open item. */
     val viewerCandidates: List<MediaItem>
         get() = if (viewerItem?.isPrivate == true) privateItems else roll
 
     /** Whether the user interface is in selection mode. */
     val selecting: Boolean get() = selection.isNotEmpty()
+
+    /** Whether every selected item is already a favourite. */
+    val selectionAllFavorite: Boolean
+        get() = selection.isNotEmpty() && selection.all { id -> index.find(id)?.isFavorite == true }
 }
 
 /**
@@ -151,22 +204,48 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     /** The gallery data. */
     val repository = GalleryRepository(application)
 
-    private val _state = MutableStateFlow(GalleryUiState())
+    private val preferences =
+        application.getSharedPreferences("zarc.gallery", Application.MODE_PRIVATE)
+
+    private val _state = MutableStateFlow(
+        GalleryUiState(
+            gridColumns = preferences.getInt("grid.columns", 3).coerceIn(2, 6),
+        ),
+    )
     /** The observable state. */
     val state: StateFlow<GalleryUiState> = _state.asStateFlow()
 
     init {
+        viewModelScope.launch(Dispatchers.IO) { repository.clearViewerCache() }
         refresh()
     }
 
     /** Reload the index from the vault. */
     fun refresh() {
         viewModelScope.launch {
+            val current = _state.value
             val index = withContext(Dispatchers.IO) { repository.loadIndex() }
+            val privateIndex = withContext(Dispatchers.IO) {
+                val key = repository.unlockedPrivateKey
+                if (current.privateUnlocked && key != null) {
+                    repository.loadPrivateIndex(key)
+                } else {
+                    current.privateIndex
+                }
+            }
             val privateAvailable = withContext(Dispatchers.IO) { repository.hasPrivateArea() }
-            _state.value = _state.value.copy(
+            _state.value = current.copy(
                 index = index,
+                privateIndex = privateIndex,
                 privateAvailable = privateAvailable,
+                viewerItem = current.viewerItem?.let { item ->
+                    if (item.isPrivate) privateIndex.find(item.id) else index.find(item.id)
+                },
+                splitItem = current.splitItem?.let { item ->
+                    if (item.isPrivate) privateIndex.find(item.id) else index.find(item.id)
+                },
+                albumId = current.albumId?.takeIf { id -> index.albums.any { it.id == id } },
+                selection = current.selection.filterTo(mutableSetOf()) { index.find(it) != null },
             )
         }
     }
@@ -175,32 +254,82 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     fun selectTab(tab: GalleryTab) {
         _state.value = _state.value.copy(
             tab = tab,
+            albumId = null,
             selection = emptySet(),
             query = "",
             searchOpen = false,
+            pageLimit = PAGE_SIZE,
             message = null,
+        )
+    }
+
+    /** Return to the roll from any section, viewer or nested screen. */
+    fun goHome() {
+        _state.value = _state.value.copy(
+            tab = GalleryTab.PHOTOS,
+            albumId = null,
+            selection = emptySet(),
+            query = "",
+            searchOpen = false,
+            pageLimit = PAGE_SIZE,
+            viewerItem = null,
+            splitMode = false,
+            splitItem = null,
+            message = null,
+        )
+    }
+
+    /** Open an album inside the albums section. */
+    fun openAlbum(albumId: String) {
+        _state.value = _state.value.copy(
+            albumId = albumId,
+            selection = emptySet(),
+            query = "",
+            searchOpen = false,
+            pageLimit = PAGE_SIZE,
         )
     }
 
     /** Change the media filter of the roll. */
     fun setFilter(filter: MediaFilter) {
-        _state.value = _state.value.copy(filter = filter)
+        _state.value = _state.value.copy(filter = filter, pageLimit = PAGE_SIZE)
     }
 
     /** Change the sort order. */
     fun setSort(sort: MediaSort) {
-        _state.value = _state.value.copy(sort = sort)
+        _state.value = _state.value.copy(sort = sort, pageLimit = PAGE_SIZE)
     }
 
     /** Open or close the search field. */
     fun toggleSearch() {
         val open = !_state.value.searchOpen
-        _state.value = _state.value.copy(searchOpen = open, query = if (open) _state.value.query else "")
+        _state.value = _state.value.copy(
+            searchOpen = open,
+            query = if (open) _state.value.query else "",
+            pageLimit = PAGE_SIZE,
+        )
     }
 
     /** Change the search query. */
     fun setQuery(query: String) {
-        _state.value = _state.value.copy(query = query)
+        _state.value = _state.value.copy(query = query, pageLimit = PAGE_SIZE)
+    }
+
+    /** Set the number of columns of the media grid and remember it. */
+    fun setGridColumns(columns: Int) {
+        val value = columns.coerceIn(2, 6)
+        if (value == _state.value.gridColumns) return
+        preferences.edit().putInt("grid.columns", value).apply()
+        _state.value = _state.value.copy(gridColumns = value)
+    }
+
+    /** Materialise the next page of the current section. */
+    fun loadMore() {
+        val current = _state.value
+        if (!current.hasMore) return
+        _state.value = current.copy(
+            pageLimit = (current.pageLimit + PAGE_SIZE).coerceAtMost(current.activeTotal),
+        )
     }
 
     /** Toggle the selection of an item. */
@@ -218,6 +347,114 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     /** Clear the selection. */
     fun clearSelection() {
         _state.value = _state.value.copy(selection = emptySet())
+    }
+
+    /** Rename the selected items; a number is appended when several are selected. */
+    fun renameSelection(name: String) {
+        val current = _state.value
+        val ids = current.selection
+        if (ids.isEmpty()) return
+        val isPrivate = current.tab == GalleryTab.PRIVATE
+        viewModelScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching { repository.renameItems(ids, name, isPrivate) }
+            }
+            result.onSuccess {
+                clearSelection()
+                refresh()
+                message(if (ids.size == 1) "renamed" else "${ids.size} items renamed")
+            }.onFailure { message("the rename failed: ${it.message}") }
+        }
+    }
+
+    /** Change the date and time of the selected items. */
+    fun setSelectionTakenAt(timestamp: Long) {
+        val current = _state.value
+        val ids = current.selection
+        if (ids.isEmpty()) return
+        val isPrivate = current.tab == GalleryTab.PRIVATE
+        viewModelScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching { repository.setTakenAt(ids, timestamp, isPrivate) }
+            }
+            result.onSuccess {
+                clearSelection()
+                refresh()
+                message("date and time updated")
+            }.onFailure { message("the date could not be changed: ${it.message}") }
+        }
+    }
+
+    /** Add or remove the selection from the favourite album. */
+    fun toggleSelectionFavorite() {
+        val current = _state.value
+        if (current.selection.isEmpty()) return
+        if (current.tab == GalleryTab.PRIVATE) {
+            message("favourites are only available outside the private area")
+            return
+        }
+        val favorite = !current.selectionAllFavorite
+        viewModelScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching { repository.setFavorite(current.selection, favorite) }
+            }
+            result.onSuccess {
+                clearSelection()
+                refresh()
+                message(if (favorite) "added to favourites" else "removed from favourites")
+            }.onFailure { message("the favourite could not be saved: ${it.message}") }
+        }
+    }
+
+    /** Rename a single item, for example from the viewer. */
+    fun renameItem(item: MediaItem, name: String) {
+        renameSelectionFor(listOf(item.id), name, item.isPrivate)
+    }
+
+    /** Change the date and time of a single item. */
+    fun setItemTakenAt(item: MediaItem, timestamp: Long) {
+        setTakenAtFor(listOf(item.id), timestamp, item.isPrivate)
+    }
+
+    /** Toggle the favourite state of a single item. */
+    fun setItemFavorite(item: MediaItem, favorite: Boolean) {
+        if (item.isPrivate) {
+            message("favourites are only available outside the private area")
+            return
+        }
+        viewModelScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching { repository.setFavorite(listOf(item.id), favorite) }
+            }
+            result.onSuccess {
+                refresh()
+                message(if (favorite) "added to favourites" else "removed from favourites")
+            }.onFailure { message("the favourite could not be saved: ${it.message}") }
+        }
+    }
+
+    private fun renameSelectionFor(ids: Collection<String>, name: String, isPrivate: Boolean) {
+        viewModelScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching { repository.renameItems(ids, name, isPrivate) }
+            }
+            result.onSuccess {
+                refresh()
+                message("renamed")
+            }.onFailure { message("the rename failed: ${it.message}") }
+        }
+    }
+
+    private fun setTakenAtFor(ids: Collection<String>, timestamp: Long, isPrivate: Boolean) {
+        viewModelScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching { repository.setTakenAt(ids, timestamp, isPrivate) }
+            }
+            result.onSuccess {
+                refresh()
+                message("date and time updated")
+            }.onFailure { message("the date could not be changed: ${it.message}") }
+        }
     }
 
     /** Open an item in the viewer. */
@@ -284,7 +521,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     }
 
     /** Import a document into the vault. */
-    fun import(uri: Uri, albumId: String = VaultIndex.ALBUM_IMPORTED, isPrivate: Boolean = false) {
+    fun import(uri: Uri, albumId: String = VaultIndex.ALBUM_NONE, isPrivate: Boolean = false) {
         viewModelScope.launch {
             _state.value = _state.value.copy(busy = true)
             val result = withContext(Dispatchers.IO) {
@@ -429,6 +666,9 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     fun lockPrivateArea() {
         repository.unlockedPrivateKey?.fill(0)
         repository.unlockedPrivateKey = null
+        ThumbnailCache.clear()
+        ViewerImageCache.clear()
+        repository.clearViewerCache()
         _state.value = _state.value.copy(privateUnlocked = false, privateIndex = VaultIndex())
     }
 

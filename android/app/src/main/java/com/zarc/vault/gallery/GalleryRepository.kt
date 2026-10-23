@@ -59,6 +59,9 @@ class GalleryRepository(private val context: Context) {
     /** The wrapped private key, released by a biometric authentication. */
     private val privateGateFile: File get() = File(vault.objectsDir.parentFile, "private/gate.bin")
 
+    /** Transient decrypted files used by the viewer and the video player. */
+    private val viewerDir: File get() = File(context.cacheDir, "viewer")
+
     // ----------------------------------------------------------------- index
 
     /** Load the index of the normal area. */
@@ -68,16 +71,19 @@ class GalleryRepository(private val context: Context) {
     fun saveIndex(index: VaultIndex) = saveIndex(indexFile, vault.vaultMasterKey(), index)
 
     private fun loadIndex(file: File, key: ByteArray): VaultIndex {
-        if (!file.exists()) return VaultIndex(albums = VaultIndex.SYSTEM_ALBUMS.toMutableList())
+        if (!file.exists()) return emptyIndex()
         return try {
             val plain = ZarcNative.nativeOpenBlob(key, file.readBytes())
-            VaultIndex.fromJson(plain)
+            VaultIndex.fromJson(plain).normalised()
         } catch (error: Exception) {
             // A damaged index must not take the whole gallery down: the media
             // is still in the vault, only the metadata is lost.
-            VaultIndex(albums = VaultIndex.SYSTEM_ALBUMS.toMutableList())
+            emptyIndex()
         }
     }
+
+    private fun emptyIndex(): VaultIndex =
+        VaultIndex(albums = VaultIndex.DEFAULT_ALBUMS.toMutableList())
 
     private fun saveIndex(file: File, key: ByteArray, index: VaultIndex) {
         file.parentFile?.mkdirs()
@@ -170,7 +176,7 @@ class GalleryRepository(private val context: Context) {
                 durationMs = 0,
                 width = 1080,
                 height = 1440,
-                albumId = VaultIndex.ALBUM_IMPORTED,
+                albumId = VaultIndex.ALBUM_NONE,
             )
             writeThumbnail(false, item, staged)
             staged.delete()
@@ -203,18 +209,115 @@ class GalleryRepository(private val context: Context) {
         saveIndex(index)
     }
 
-    /** Move items into an album. */
+    /**
+     * Move items into an album.
+     *
+     * Moving into the favourite album marks the item as a favourite; moving
+     * out of it clears the flag. The favourite album is a normal album with a
+     * reserved id, so sorting, filtering and search keep working unchanged.
+     */
     fun moveToAlbum(ids: List<String>, albumId: String) {
         val index = loadIndex()
-        index.items.replaceAll { item -> if (item.id in ids) item.copy(albumId = albumId) else item }
+        index.items.replaceAll { item ->
+            if (item.id in ids) {
+                item.copy(
+                    albumId = albumId,
+                    isFavorite = albumId == VaultIndex.ALBUM_FAVOURITES,
+                )
+            } else {
+                item
+            }
+        }
         saveIndex(index)
     }
 
-    /** Delete an album. Its items move to the imported album. */
+    /** Delete an album. Its items return to the roll. */
     fun deleteAlbum(albumId: String) {
+        if (albumId == VaultIndex.ALBUM_FAVOURITES) return
         val index = loadIndex()
         index.albums.removeAll { it.id == albumId && !it.system }
-        index.items.replaceAll { item -> if (item.albumId == albumId) item.copy(albumId = VaultIndex.ALBUM_IMPORTED) else item }
+        index.items.replaceAll { item ->
+            if (item.albumId == albumId) item.copy(albumId = VaultIndex.ALBUM_NONE) else item
+        }
+        saveIndex(index)
+    }
+
+    /** Load the index of an area, private or normal. */
+    private fun loadAreaIndex(isPrivate: Boolean): VaultIndex {
+        if (!isPrivate) return loadIndex()
+        val key = unlockedPrivateKey ?: return VaultIndex()
+        return loadPrivateIndex(key)
+    }
+
+    /** Save the index of an area, private or normal. */
+    private fun saveAreaIndex(isPrivate: Boolean, index: VaultIndex) {
+        if (!isPrivate) {
+            saveIndex(index)
+        } else {
+            val key = unlockedPrivateKey ?: return
+            savePrivateIndex(key, index)
+        }
+    }
+
+    /** Rename a set of items while preserving their file extensions. */
+    fun renameItems(
+        ids: Collection<String>,
+        requestedName: String,
+        isPrivate: Boolean = false,
+    ) {
+        val index = loadAreaIndex(isPrivate)
+        val targets = index.items.filter { it.id in ids }
+        if (targets.isEmpty()) return
+        val root = requestedName.substringBeforeLast('.', requestedName).trim()
+        if (root.isEmpty()) return
+        val explicitExtension = requestedName.substringAfterLast('.', "")
+        val positions = index.items.withIndex().associate { (position, item) -> item.id to position }
+        targets.forEachIndexed { position, item ->
+            val extension = explicitExtension.ifEmpty { item.extension }
+            val suffix = if (targets.size > 1) " ${position + 1}" else ""
+            val name = buildString {
+                append(root)
+                append(suffix)
+                if (extension.isNotEmpty()) append('.').append(extension)
+            }
+            val target = positions[item.id] ?: return@forEachIndexed
+            index.items[target] = item.copy(name = name)
+        }
+        saveAreaIndex(isPrivate, index)
+    }
+
+    /** Change the capture time of a set of items. */
+    fun setTakenAt(
+        ids: Collection<String>,
+        timestamp: Long,
+        isPrivate: Boolean = false,
+    ) {
+        val index = loadAreaIndex(isPrivate)
+        index.items.replaceAll { item ->
+            if (item.id in ids) item.copy(takenAt = timestamp) else item
+        }
+        saveAreaIndex(isPrivate, index)
+    }
+
+    /** Add or remove a set of items from the favourite album. */
+    fun setFavorite(ids: Collection<String>, favorite: Boolean) {
+        val index = loadIndex()
+        index.albums.removeAll { it.id == VaultIndex.ALBUM_FAVOURITES }
+        index.albums.add(0, VaultIndex.FAVOURITE_ALBUM)
+        index.items.replaceAll { item ->
+            if (item.id in ids) {
+                item.copy(
+                    isFavorite = favorite,
+                    albumId = when {
+                        favorite -> VaultIndex.ALBUM_FAVOURITES
+                        item.albumId == VaultIndex.ALBUM_FAVOURITES -> VaultIndex.ALBUM_NONE
+                        else -> item.albumId
+                    },
+                )
+            } else {
+                item
+            }
+        }
         saveIndex(index)
     }
 
@@ -339,6 +442,76 @@ class GalleryRepository(private val context: Context) {
         } catch (error: Exception) {
             null
         }
+    }
+
+    /**
+     * Decrypt an image into a temporary file, decode it at a bounded
+     * resolution and remove the temporary file again.
+     *
+     * The viewer needs more than the 320 px thumbnail to make pinch to zoom
+     * useful. The plaintext file exists only for the duration of the decode.
+     */
+    fun decodeForViewer(item: MediaItem, maxDimension: Int): Bitmap? {
+        viewerDir.mkdirs()
+        val staged = File(viewerDir, "image-${item.id}.${item.extension.ifEmpty { "bin" }}")
+        val key = if (item.isPrivate) unlockedPrivateKey ?: vault.vaultMasterKey() else vault.vaultMasterKey()
+        return try {
+            ZarcNative.nativeDecryptFile(
+                key,
+                item.id,
+                objectsDirOf(item.isPrivate).absolutePath,
+                viewerDir.absolutePath,
+                staged.name,
+            )
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeFile(staged.absolutePath, bounds)
+            if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+            var sample = 1
+            while (
+                bounds.outWidth / sample > maxDimension * 2 ||
+                bounds.outHeight / sample > maxDimension * 2
+            ) {
+                sample *= 2
+            }
+            BitmapFactory.decodeFile(
+                staged.absolutePath,
+                BitmapFactory.Options().apply {
+                    inSampleSize = sample
+                    inPreferredConfig = Bitmap.Config.ARGB_8888
+                },
+            )
+        } catch (error: Exception) {
+            null
+        } finally {
+            staged.delete()
+        }
+    }
+
+    /**
+     * Decrypt a video into the cache for playback and return the file.
+     *
+     * The caller owns the file and must delete it when the player goes away.
+     * The previous copy of the same object is replaced, so a stale playable
+     * file never survives a newer decryption.
+     */
+    fun preparePlayback(item: MediaItem): File {
+        viewerDir.mkdirs()
+        val file = File(viewerDir, "playback-${item.id}.${item.extension.ifEmpty { "bin" }}")
+        file.delete()
+        val key = if (item.isPrivate) unlockedPrivateKey ?: vault.vaultMasterKey() else vault.vaultMasterKey()
+        ZarcNative.nativeDecryptFile(
+            key,
+            item.id,
+            objectsDirOf(item.isPrivate).absolutePath,
+            viewerDir.absolutePath,
+            file.name,
+        )
+        return file
+    }
+
+    /** Remove every transient decrypted file left behind by an older run. */
+    fun clearViewerCache() {
+        viewerDir.listFiles()?.forEach { it.delete() }
     }
 
     // ------------------------------------------------------------- helpers

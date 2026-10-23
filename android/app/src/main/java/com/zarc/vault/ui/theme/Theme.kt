@@ -64,6 +64,9 @@ object ZarcPalette {
 
     /** The recycle bin. */
     val bin = Color(0xFF8A8A93)
+
+    /** The favourite album. */
+    val favourite = Color(0xFFFFC44D)
 }
 
 /** The typography of the gallery: a little tighter than the Material default. */

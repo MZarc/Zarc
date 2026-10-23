@@ -60,16 +60,18 @@ sheet-based actions:
 
 | Area | What it does |
 |------|--------------|
-| **Roll** | Three-column grid of photos and videos, title and item count under the status bar, search, sort, `All / Photos / Videos` filter, long-press selection, select all, move, delete |
-| **Albums** | Covers, counts, create, rename, delete; `Camera`, `Screenshots`, `Downloads` and `Imported` exist from the start |
-| **Private** | Unlocked with device authentication (biometric or device credential); its media is encrypted with a **separate subkey**, so it is protected twice |
+| **Roll** | Photo and video grid, two to six columns (pinch or the layout menu), title and item count under the status bar, search, sort, `All / Photos / Videos` filter, long-press selection, select all, move, delete; loads in pages so a 10 000-item vault stays responsive |
+| **Albums** | Covers, counts, create, rename, delete; only `Favourite` exists from the start and is filled with the star action |
+| **Private** | Unlocked with device authentication (biometric or device credential); its media is encrypted with a **separate subkey**, so it is protected twice; locking drops the key and every cached plaintext bitmap |
 | **Bin** | Deleting moves the encrypted object; restoring moves it back; emptying removes it permanently |
 | **Settings** | Real Keystore protection report, recovery state, key rotation, private area, developer tools |
-| **Viewer** | Full-screen with pinch zoom, capture date, open-with, re-encrypt and delete; **split view** for two photos at once (stacked in portrait, side by side in landscape) |
-| **Import / share** | SAF import with no storage permission; open-with decrypts into the cache and hands it over through a `FileProvider` with a temporary grant — the vault object itself is never shared |
+| **Viewer** | Full-screen images and video; tap to hide the chrome and system bars, pinch to zoom (1×–6×), double tap to toggle 2.5×, rename, edit the capture date, add to favourites, open-with, re-encrypt and delete; while split, one image or video per pane with a draggable divider (stacked in portrait, side by side in landscape) |
+| **Import / share** | SAF import of images and video with no storage permission; open-with decrypts into the cache and hands it over through a `FileProvider` with a temporary grant — the vault object itself is never shared |
 
-There is no third-party Android UI dependency: the icons are the Material
-Rounded family plus a hand-drawn import vector (`ZarcIcons.kt`).
+The only runtime dependency beyond the AndroidX UI, lifecycle and biometric
+libraries is AndroidX Media3 (`media3-exoplayer` and `media3-ui`) for video
+playback. The icons are the Material Rounded family plus a hand-drawn import
+vector (`ZarcIcons.kt`).
 
 ## Security model
 
@@ -304,7 +306,11 @@ Zarc is honest about what it does not protect. The full list is in
    narrows the window; it does not eliminate it.
 4. **A compromised OS, root, or malware inside the app is out of scope.**
 5. **Deleting a file does not guarantee forensic erasure on flash storage.**
-6. **No independent audit, no StrongBox test, no server-side recovery share.**
+6. **Open-with and video playback need a temporary plaintext copy.** Zarc
+   decrypts into its cache, deletes it when the viewer closes or the app next
+   starts, and shares only through a temporary grant. Image viewing keeps the
+   full-size bitmap in memory (never on disk); private images are not cached.
+7. **No independent audit, no StrongBox test, no server-side recovery share.**
 
 ## Documentation
 

@@ -27,8 +27,10 @@ data class MediaItem(
     val width: Int,
     /** The height of the media in pixels. */
     val height: Int,
-    /** The album the item belongs to. */
+    /** The album the item belongs to, or [ALBUM_NONE] when it is only in the roll. */
     val albumId: String,
+    /** Whether the item is in the favourite album. */
+    val isFavorite: Boolean = false,
     /** Whether the item lives in the private area. */
     val isPrivate: Boolean = false,
     /** Whether the item is in the recycle bin. */
@@ -95,6 +97,7 @@ class VaultIndex(
                     put("width", item.width)
                     put("height", item.height)
                     put("album", item.albumId)
+                    put("favorite", item.isFavorite)
                     put("private", item.isPrivate)
                     put("deleted", item.isDeleted)
                 })
@@ -111,28 +114,63 @@ class VaultIndex(
         })
     }.toString().toByteArray(Charsets.UTF_8)
 
+    /**
+     * Bring an index written by an older build up to the current model.
+     *
+     * The first versions of the gallery shipped four system albums and put
+     * every import into `Imported`. The gallery now has a single built-in
+     * album, `Favourite`; everything else lives in the roll. Items that were
+     * in a legacy system album are moved to the roll and the legacy albums are
+     * dropped, exactly once, when the index is loaded.
+     */
+    fun normalised(): VaultIndex {
+        albums.removeAll { it.id in LEGACY_ALBUM_IDS }
+        if (albums.none { it.id == ALBUM_FAVOURITES }) {
+            albums.add(0, FAVOURITE_ALBUM)
+        }
+        val knownAlbums = albums.mapTo(mutableSetOf()) { it.id }
+        items.replaceAll { item ->
+            var next = item
+            if (next.albumId in LEGACY_ALBUM_IDS) next = next.copy(albumId = ALBUM_NONE)
+            if (next.albumId.isNotEmpty() && next.albumId !in knownAlbums) {
+                next = next.copy(albumId = ALBUM_NONE)
+            }
+            when {
+                next.isFavorite -> next.copy(albumId = ALBUM_FAVOURITES)
+                next.albumId == ALBUM_FAVOURITES -> next.copy(isFavorite = true)
+                else -> next
+            }
+        }
+        return this
+    }
+
     companion object {
         /** The version of the index format. */
         const val VERSION = 1
 
-        /** The id of the album that holds the imported media by default. */
-        const val ALBUM_IMPORTED = "imported"
+        /** The id of the built-in favourite album. */
+        const val ALBUM_FAVOURITES = "favourites"
 
-        /** The id of the system album for camera shots. */
-        const val ALBUM_CAMERA = "camera"
+        /** The album id of an item that is only in the roll. */
+        const val ALBUM_NONE = ""
 
-        /** The id of the system album for screenshots. */
-        const val ALBUM_SCREENSHOTS = "screenshots"
+        /** The id of the favourite album. It is always present. */
+        val FAVOURITE_ALBUM = Album(ALBUM_FAVOURITES, "Favourite", system = true)
 
-        /** The id of the system album for downloads. */
-        const val ALBUM_DOWNLOADS = "downloads"
+        /** The default albums of a fresh vault. */
+        val DEFAULT_ALBUMS = listOf(FAVOURITE_ALBUM)
 
-        /** The default system albums of a fresh vault. */
-        val SYSTEM_ALBUMS = listOf(
-            Album(ALBUM_CAMERA, "Camera", system = true),
-            Album(ALBUM_SCREENSHOTS, "Screenshots", system = true),
-            Album(ALBUM_DOWNLOADS, "Downloads", system = true),
-            Album(ALBUM_IMPORTED, "Imported", system = true),
+        // The system albums of the first index version. They exist only so
+        // that an index written by an older build can be migrated.
+        private const val LEGACY_IMPORTED = "imported"
+        private const val LEGACY_CAMERA = "camera"
+        private const val LEGACY_SCREENSHOTS = "screenshots"
+        private const val LEGACY_DOWNLOADS = "downloads"
+        private val LEGACY_ALBUM_IDS = setOf(
+            LEGACY_IMPORTED,
+            LEGACY_CAMERA,
+            LEGACY_SCREENSHOTS,
+            LEGACY_DOWNLOADS,
         )
 
         /** Parse an index. */
@@ -152,7 +190,8 @@ class VaultIndex(
                         durationMs = item.optLong("duration", 0L),
                         width = item.optInt("width", 0),
                         height = item.optInt("height", 0),
-                        albumId = item.optString("album", ALBUM_IMPORTED),
+                        albumId = item.optString("album", ALBUM_NONE),
+                        isFavorite = item.optBoolean("favorite", false),
                         isPrivate = item.optBoolean("private", false),
                         isDeleted = item.optBoolean("deleted", false),
                     ),

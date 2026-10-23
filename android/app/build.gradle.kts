@@ -154,8 +154,8 @@ kotlin {
 }
 
 dependencies {
-    // The application itself has no third party dependencies: the security
-    // relevant code is the Kotlin platform adapter plus the Rust core.
+    // The security relevant code is the Kotlin platform adapter plus the Rust
+    // core; the only added runtime dependency is Media3 for video playback.
     testImplementation("junit:junit:4.13.2")
 
     // The user interface.
@@ -172,6 +172,10 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.10.0")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.10.0")
     implementation("androidx.biometric:biometric:1.1.0")
+    // Video playback of the decrypted stream. Media3 is Google's maintained
+    // successor to ExoPlayer and is the only non-AndroidX UI addition.
+    implementation("androidx.media3:media3-exoplayer:1.11.1")
+    implementation("androidx.media3:media3-ui:1.11.1")
     // The test framework is loaded into the application process when the
     // release build is instrumented, and it needs `androidx.tracing.Trace`.
     // The library is tiny and keeps the shipping artifact testable.
