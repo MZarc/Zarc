@@ -1357,27 +1357,71 @@ fun MediaGrid(
             }
         }
 
-        // Fast Scrollbar
+        // Fast Scrollbar (Samsung Gallery smooth, accurate physics)
         if (entries.size > 15) {
             val totalItems = entries.size
             val topInset = 8.dp
             val bottomInset = FloatingBarRoom + 8.dp
             val thumbHeightDp = 48.dp
 
-            val scrollFraction by remember(totalItems) {
+            // Map each grid entry to its true logical row in the grid layout
+            val entryToRow = remember(entries, columns) {
+                val map = IntArray(entries.size)
+                var row = 0
+                var colInRow = 0
+                for (i in entries.indices) {
+                    val entry = entries[i]
+                    if (entry is GridEntry.DateHeader) {
+                        if (colInRow > 0) {
+                            row++
+                            colInRow = 0
+                        }
+                        map[i] = row
+                        row++
+                    } else {
+                        map[i] = row
+                        colInRow++
+                        if (colInRow >= columns) {
+                            row++
+                            colInRow = 0
+                        }
+                    }
+                }
+                map
+            }
+            val totalRows = remember(entryToRow) {
+                if (entryToRow.isEmpty()) 1 else (entryToRow.last() + 1).coerceAtLeast(1)
+            }
+
+            // High precision row-level scroll fraction calculation
+            val scrollFraction by remember(totalRows) {
                 derivedStateOf {
                     if (!gridState.canScrollForward && gridState.canScrollBackward) {
                         1f
                     } else if (!gridState.canScrollBackward) {
                         0f
                     } else {
-                        val firstIndex = gridState.firstVisibleItemIndex
-                        (firstIndex.toFloat() / (totalItems - 1).coerceAtLeast(1).toFloat()).coerceIn(0f, 1f)
+                        val layoutInfo = gridState.layoutInfo
+                        val visibleItems = layoutInfo.visibleItemsInfo
+                        if (visibleItems.isEmpty()) return@derivedStateOf 0f
+                        val firstVisibleItem = visibleItems.first()
+                        val firstIndex = firstVisibleItem.index.coerceIn(0, entries.size - 1)
+                        val itemRow = entryToRow.getOrElse(firstIndex) { 0 }
+                        val rowHeight = firstVisibleItem.size.height.toFloat().coerceAtLeast(1f)
+                        val subRowOffset = (-firstVisibleItem.offset.y.toFloat() / rowHeight).coerceIn(0f, 1f)
+                        val currentRow = itemRow.toFloat() + subRowOffset
+                        (currentRow / (totalRows - 1).coerceAtLeast(1).toFloat()).coerceIn(0f, 1f)
                     }
                 }
             }
 
-            val currentFraction = if (isDraggingBar) dragProgress else scrollFraction
+            // Smooth animated thumb position when naturally scrolling; instantaneous 1:1 response when dragging
+            val animatedFraction by animateFloatAsState(
+                targetValue = scrollFraction,
+                animationSpec = tween(durationMillis = 60),
+                label = "scrollbar_fraction",
+            )
+            val currentFraction = if (isDraggingBar) dragProgress else animatedFraction
             val usableHeightDp = (maxHeight - topInset - bottomInset - thumbHeightDp).coerceAtLeast(0.dp)
             val thumbOffsetDp = topInset + usableHeightDp * currentFraction
 
@@ -1397,7 +1441,7 @@ fun MediaGrid(
                 }
             }
 
-            // Floating date pill
+            // Floating date pill anchored next to scrollbar thumb
             if (isDraggingBar && activeDateLabel.isNotEmpty()) {
                 Surface(
                     shape = RoundedCornerShape(16.dp),
@@ -1416,14 +1460,14 @@ fun MediaGrid(
                 }
             }
 
-            // Scrollbar Track & Thumb
+            // Scrollbar Track & Thumb with larger hit area (36dp) and premium pill design
             Box(
                 modifier = Modifier
                     .align(Alignment.TopEnd)
                     .padding(top = topInset, bottom = bottomInset)
                     .fillMaxHeight()
                     .width(36.dp)
-                    .pointerInput(totalItems) {
+                    .pointerInput(totalItems, totalRows) {
                         val thumbHeightPx = 48.dp.toPx()
                         detectVerticalDragGestures(
                             onDragStart = { offset ->
