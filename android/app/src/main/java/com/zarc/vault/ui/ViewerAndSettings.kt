@@ -12,6 +12,8 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -32,6 +34,12 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.border
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
@@ -47,6 +55,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
@@ -60,6 +69,18 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import android.content.Intent
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.SliderDefaults
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -97,7 +118,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /** Format a byte count for the details of the viewer. */
-private fun formatBytes(bytes: Long): String = when {
+internal fun formatBytes(bytes: Long): String = when {
     bytes < 1024 -> "$bytes B"
     bytes < 1024 * 1024 -> String.format(Locale.US, "%.0f KB", bytes / 1024.0)
     bytes < 1024L * 1024 * 1024 -> String.format(Locale.US, "%.1f MB", bytes / (1024.0 * 1024.0))
@@ -113,42 +134,69 @@ private fun formatBytes(bytes: Long): String = when {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ViewerScreen(
-    item: MediaItem,
+    initialItem: MediaItem,
+    items: List<MediaItem> = listOf(initialItem),
     isPrivate: Boolean,
     repository: GalleryRepository,
     onClose: () -> Unit,
     onOpenWith: (MediaItem) -> Unit,
     onOpenInSplit: () -> Unit,
-    onDelete: () -> Unit,
-    onReencrypt: () -> Unit,
-    onRename: () -> Unit,
-    onEditDate: () -> Unit,
-    onToggleFavorite: () -> Unit,
+    onDelete: (MediaItem) -> Unit,
+    onReencrypt: (MediaItem) -> Unit,
+    onRename: (MediaItem) -> Unit,
+    onEditDate: (MediaItem) -> Unit,
+    onToggleFavorite: (MediaItem) -> Unit,
+    onRestore: ((MediaItem) -> Unit)? = null,
+    onMoveToPrivate: ((MediaItem) -> Unit)? = null,
+    onSetAsCover: ((MediaItem) -> Unit)? = null,
 ) {
-    var menu by remember(item.id) { mutableStateOf(false) }
-    var chrome by remember(item.id) { mutableStateOf(true) }
+    val initialPage = remember(initialItem.id, items) {
+        val idx = items.indexOfFirst { it.id == initialItem.id }
+        if (idx >= 0) idx else 0
+    }
+    val pagerState = rememberPagerState(initialPage = initialPage) { items.size }
+    LaunchedEffect(initialItem.id) {
+        val idx = items.indexOfFirst { it.id == initialItem.id }
+        if (idx >= 0 && idx != pagerState.currentPage) {
+            pagerState.scrollToPage(idx)
+        }
+    }
+    val currentItem = items.getOrNull(pagerState.currentPage) ?: initialItem
+
+    var menu by remember(currentItem.id) { mutableStateOf(false) }
+    var chrome by remember(currentItem.id) { mutableStateOf(true) }
+    var showInfo by remember(currentItem.id) { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+    val context = LocalContext.current
 
     Box(
         Modifier
             .fillMaxSize()
             .background(Color.Black),
     ) {
-        if (item.isVideo) {
-            VideoSurface(
-                item = item,
-                repository = repository,
-                controlsVisible = chrome,
-                onToggleChrome = { chrome = !chrome },
-                modifier = Modifier.fillMaxSize(),
-            )
-        } else {
-            ZoomableMedia(
-                repository = repository,
-                item = item,
-                isPrivate = isPrivate,
-                onSingleTap = { chrome = !chrome },
-                modifier = Modifier.fillMaxSize(),
-            )
+        HorizontalPager(
+            state = pagerState,
+            key = { items.getOrNull(it)?.id ?: it },
+            modifier = Modifier.fillMaxSize(),
+        ) { page ->
+            val pageItem = items.getOrNull(page) ?: currentItem
+            if (pageItem.isVideo) {
+                VideoSurface(
+                    item = pageItem,
+                    repository = repository,
+                    controlsVisible = chrome,
+                    onToggleChrome = { chrome = !chrome },
+                    modifier = Modifier.fillMaxSize(),
+                )
+            } else {
+                ZoomableMedia(
+                    repository = repository,
+                    item = pageItem,
+                    isPrivate = isPrivate,
+                    onSingleTap = { chrome = !chrome },
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
         }
 
         AnimatedVisibility(
@@ -161,13 +209,13 @@ fun ViewerScreen(
                 title = {
                     Column {
                         Text(
-                            text = item.name,
+                            text = currentItem.name,
                             style = MaterialTheme.typography.titleSmall,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
                         Text(
-                            text = repository.formatDate(item.takenAt),
+                            text = repository.formatDate(currentItem.takenAt),
                             style = MaterialTheme.typography.bodySmall,
                             color = Color.White.copy(alpha = 0.7f),
                         )
@@ -179,12 +227,14 @@ fun ViewerScreen(
                     }
                 },
                 actions = {
-                    IconButton(onClick = { menu = true }) {
-                        Icon(
-                            imageVector = ZarcIcons.MoreVert,
-                            contentDescription = "More options",
-                            tint = Color.White,
-                        )
+                    if (!currentItem.isDeleted) {
+                        IconButton(onClick = { menu = true }) {
+                            Icon(
+                                imageVector = ZarcIcons.MoreVert,
+                                contentDescription = "More options",
+                                tint = Color.White,
+                            )
+                        }
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent),
@@ -195,6 +245,177 @@ fun ViewerScreen(
                 ),
             )
         }
+
+        // Dedicated bottom action bar for Recycle Bin items (Samsung Gallery style)
+        AnimatedVisibility(
+            visible = chrome && currentItem.isDeleted,
+            modifier = Modifier.align(Alignment.BottomCenter),
+            enter = fadeIn() + slideInVertically { it },
+            exit = fadeOut() + slideOutVertically { it },
+        ) {
+            val now = System.currentTimeMillis()
+            val daysPassed = ((now - currentItem.deletedAt) / (24L * 60 * 60 * 1000L)).toInt()
+            val daysLeft = maxOf(0, 30 - daysPassed)
+            val deletedAtFormatted = if (currentItem.deletedAt > 0L) repository.formatDate(currentItem.deletedAt) else "Recently"
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(
+                        Brush.verticalGradient(
+                            listOf(Color.Transparent, Color.Black.copy(alpha = 0.88f)),
+                        ),
+                    )
+                    .navigationBarsPadding()
+                    .padding(horizontal = 24.dp, vertical = 16.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                Text(
+                    text = "Deleted on $deletedAtFormatted · $daysLeft days left",
+                    style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Medium),
+                    color = Color.White.copy(alpha = 0.85f),
+                )
+                Spacer(Modifier.height(14.dp))
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(16.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    if (onRestore != null) {
+                        Surface(
+                            onClick = {
+                                ZarcHaptics.click(context)
+                                onRestore(currentItem)
+                            },
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(48.dp),
+                            shape = RoundedCornerShape(24.dp),
+                            color = MaterialTheme.colorScheme.surfaceVariant,
+                            tonalElevation = 6.dp,
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxSize(),
+                                horizontalArrangement = Arrangement.Center,
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Icon(
+                                    imageVector = ZarcIcons.Restore,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(20.dp),
+                                )
+                                Spacer(Modifier.width(8.dp))
+                                Text(
+                                    text = "Restore",
+                                    style = MaterialTheme.typography.labelLarge,
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                )
+                            }
+                        }
+                    }
+                    Surface(
+                        onClick = {
+                            ZarcHaptics.click(context)
+                            onDelete(currentItem)
+                        },
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(48.dp),
+                        shape = RoundedCornerShape(24.dp),
+                        color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.9f),
+                        tonalElevation = 6.dp,
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxSize(),
+                            horizontalArrangement = Arrangement.Center,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Icon(
+                                imageVector = ZarcIcons.Delete,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.error,
+                                modifier = Modifier.size(20.dp),
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                text = "Delete",
+                                style = MaterialTheme.typography.labelLarge,
+                                color = MaterialTheme.colorScheme.onErrorContainer,
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        // Small Tile Filmstrip (Samsung Gallery Carousel) at the bottom
+        AnimatedVisibility(
+            visible = chrome && !currentItem.isDeleted && items.size > 1,
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .navigationBarsPadding()
+                .padding(bottom = 12.dp),
+            enter = fadeIn() + slideInVertically { it },
+            exit = fadeOut() + slideOutVertically { it },
+        ) {
+            val filmstripState = rememberLazyListState()
+
+            LaunchedEffect(pagerState.currentPage) {
+                filmstripState.animateScrollToItem(maxOf(0, pagerState.currentPage - 2))
+            }
+
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(60.dp)
+                    .background(
+                        Brush.verticalGradient(
+                            listOf(Color.Transparent, Color.Black.copy(alpha = 0.85f)),
+                        ),
+                    )
+                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                LazyRow(
+                    state = filmstripState,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    contentPadding = PaddingValues(horizontal = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.fillMaxSize(),
+                ) {
+                    itemsIndexed(items, key = { _, it -> it.id }) { index, tileItem ->
+                        val isSelected = index == pagerState.currentPage
+                        Box(
+                            modifier = Modifier
+                                .size(if (isSelected) 48.dp else 40.dp)
+                                .clip(RoundedCornerShape(8.dp))
+                                .then(
+                                    if (isSelected) {
+                                        Modifier.border(2.dp, Color.White, RoundedCornerShape(8.dp))
+                                    } else {
+                                        Modifier
+                                    },
+                                )
+                                .clickable {
+                                    ZarcHaptics.click(context)
+                                    scope.launch {
+                                        pagerState.animateScrollToPage(index)
+                                    }
+                                },
+                        ) {
+                            MediaThumbnail(
+                                repository = repository,
+                                item = tileItem,
+                                isPrivate = isPrivate,
+                                modifier = Modifier.fillMaxSize(),
+                            )
+                        }
+                    }
+                }
+            }
+        }
     }
 
     ImmersiveChrome(hidden = !chrome)
@@ -202,14 +423,23 @@ fun ViewerScreen(
     if (menu) {
         ZarcSheet(onDismiss = { menu = false }) {
             SheetHeader(
-                title = item.name,
-                subtitle = "${repository.formatDate(item.takenAt)} · ${formatBytes(item.size)}",
+                title = currentItem.name,
+                subtitle = "${repository.formatDate(currentItem.takenAt)} · ${formatBytes(currentItem.size)}",
             )
             Text(
-                text = "${item.width} × ${item.height} · ${item.mime}",
+                text = "${currentItem.width} × ${currentItem.height} · ${currentItem.mime}",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(start = 10.dp, end = 10.dp, bottom = 10.dp),
+            )
+            SheetAction(
+                icon = ZarcIcons.Info,
+                title = "Details",
+                subtitle = "View full metadata, dimensions and encryption details",
+                onClick = {
+                    menu = false
+                    showInfo = true
+                },
             )
             SheetAction(
                 icon = ZarcIcons.Edit,
@@ -217,7 +447,7 @@ fun ViewerScreen(
                 subtitle = "Change the display name",
                 onClick = {
                     menu = false
-                    onRename()
+                    onRename(currentItem)
                 },
             )
             SheetAction(
@@ -226,14 +456,14 @@ fun ViewerScreen(
                 subtitle = "Change when the media was captured",
                 onClick = {
                     menu = false
-                    onEditDate()
+                    onEditDate(currentItem)
                 },
             )
-            if (!item.isPrivate) {
+            if (!currentItem.isPrivate) {
                 SheetAction(
-                    icon = if (item.isFavorite) ZarcIcons.Star else ZarcIcons.StarBorder,
-                    title = if (item.isFavorite) "Remove from favourites" else "Add to favourites",
-                    subtitle = if (item.isFavorite) {
+                    icon = if (currentItem.isFavorite) ZarcIcons.Star else ZarcIcons.StarBorder,
+                    title = if (currentItem.isFavorite) "Remove from favourites" else "Add to favourites",
+                    subtitle = if (currentItem.isFavorite) {
                         "Move it back to the roll"
                     } else {
                         "Move it into the favourite album"
@@ -241,7 +471,7 @@ fun ViewerScreen(
                     tint = ZarcPalette.favourite,
                     onClick = {
                         menu = false
-                        onToggleFavorite()
+                        onToggleFavorite(currentItem)
                     },
                 )
             }
@@ -260,16 +490,38 @@ fun ViewerScreen(
                 subtitle = "Hand a decrypted copy to another application",
                 onClick = {
                     menu = false
-                    onOpenWith(item)
+                    onOpenWith(currentItem)
                 },
             )
+            if (!currentItem.isPrivate && onMoveToPrivate != null) {
+                SheetAction(
+                    icon = ZarcIcons.Lock,
+                    title = "Move to Private Vault",
+                    subtitle = "Double-encrypt and hide from gallery",
+                    onClick = {
+                        menu = false
+                        onMoveToPrivate(currentItem)
+                    },
+                )
+            }
+            if (onSetAsCover != null) {
+                SheetAction(
+                    icon = ZarcIcons.Albums,
+                    title = "Set as album cover",
+                    subtitle = "Use this photo as the album thumbnail",
+                    onClick = {
+                        menu = false
+                        onSetAsCover(currentItem)
+                    },
+                )
+            }
             SheetAction(
                 icon = ZarcIcons.Shield,
                 title = "Encrypt again",
                 subtitle = "Re-wrap the object under a fresh data key",
                 onClick = {
                     menu = false
-                    onReencrypt()
+                    onReencrypt(currentItem)
                 },
             )
             SheetAction(
@@ -279,10 +531,18 @@ fun ViewerScreen(
                 destructive = true,
                 onClick = {
                     menu = false
-                    onDelete()
+                    onDelete(currentItem)
                 },
             )
         }
+    }
+
+    if (showInfo) {
+        MediaInfoDialog(
+            items = listOf(currentItem),
+            repository = repository,
+            onDismiss = { showInfo = false },
+        )
     }
 }
 
@@ -397,24 +657,30 @@ private fun ZoomableMedia(
                         translationX = offsetX
                         translationY = offsetY
                     }
-                    .pointerInput(item.id, displayedWidth, displayedHeight) {
-                        detectTransformGestures(panZoomLock = true) { centroid, pan, zoom, _ ->
-                            animationJob?.cancel()
-                            val oldScale = scale
-                            val nextScale = (oldScale * zoom).coerceIn(1f, 6f)
-                            if (nextScale != oldScale) {
-                                val factor = nextScale / oldScale
-                                val centerX = centroid.x - size.width / 2f
-                                val centerY = centroid.y - size.height / 2f
-                                offsetX = offsetX * factor + centerX * (1f - factor)
-                                offsetY = offsetY * factor + centerY * (1f - factor)
+                    .then(
+                        if (scale > 1.05f) {
+                            Modifier.pointerInput(item.id, displayedWidth, displayedHeight) {
+                                detectTransformGestures(panZoomLock = true) { centroid, pan, zoom, _ ->
+                                    animationJob?.cancel()
+                                    val oldScale = scale
+                                    val nextScale = (oldScale * zoom).coerceIn(1f, 6f)
+                                    if (nextScale != oldScale) {
+                                        val factor = nextScale / oldScale
+                                        val centerX = centroid.x - size.width / 2f
+                                        val centerY = centroid.y - size.height / 2f
+                                        offsetX = offsetX * factor + centerX * (1f - factor)
+                                        offsetY = offsetY * factor + centerY * (1f - factor)
+                                    }
+                                    offsetX += pan.x
+                                    offsetY += pan.y
+                                    scale = nextScale
+                                    clampOffsets(nextScale)
+                                }
                             }
-                            offsetX += pan.x
-                            offsetY += pan.y
-                            scale = nextScale
-                            clampOffsets(nextScale)
+                        } else {
+                            Modifier
                         }
-                    }
+                    )
                     .pointerInput(item.id) {
                         detectTapGestures(
                             onTap = { onSingleTap() },
@@ -669,27 +935,92 @@ fun SplitViewerScreen(
     var chrome by remember { mutableStateOf(true) }
     var ratio by remember { mutableFloatStateOf(0.5f) }
 
+    val safeCandidates = remember(candidates, primary, secondary) {
+        if (candidates.isNotEmpty()) candidates
+        else listOfNotNull(primary, secondary)
+    }
+
+    val primaryInitIndex = remember(primary.id, safeCandidates) {
+        val idx = safeCandidates.indexOfFirst { it.id == primary.id }
+        if (idx >= 0) idx else 0
+    }
+    val secondaryInitIndex = remember(secondary?.id, safeCandidates) {
+        val idx = if (secondary != null) safeCandidates.indexOfFirst { it.id == secondary.id } else 0
+        if (idx >= 0) idx else 0
+    }
+
+    val primaryPagerState = rememberPagerState(
+        initialPage = primaryInitIndex.coerceIn(0, maxOf(0, safeCandidates.size - 1)),
+    ) { safeCandidates.size }
+
+    val secondaryPagerState = rememberPagerState(
+        initialPage = secondaryInitIndex.coerceIn(0, maxOf(0, safeCandidates.size - 1)),
+    ) { safeCandidates.size }
+
+    val scope = rememberCoroutineScope()
+
+    LaunchedEffect(primaryPagerState) {
+        snapshotFlow { primaryPagerState.currentPage }
+            .collect { page ->
+                safeCandidates.getOrNull(page)?.let { item ->
+                    if (item.id != primary.id) onPickPrimary(item)
+                }
+            }
+    }
+
+    LaunchedEffect(secondaryPagerState) {
+        snapshotFlow { secondaryPagerState.currentPage }
+            .collect { page ->
+                safeCandidates.getOrNull(page)?.let { item ->
+                    if (secondary != null && item.id != secondary.id) onPickSecondary(item)
+                }
+            }
+    }
+
+    LaunchedEffect(primary.id) {
+        val idx = safeCandidates.indexOfFirst { it.id == primary.id }
+        if (idx >= 0 && idx != primaryPagerState.currentPage) {
+            primaryPagerState.scrollToPage(idx)
+        }
+    }
+    LaunchedEffect(secondary?.id) {
+        if (secondary != null) {
+            val idx = safeCandidates.indexOfFirst { it.id == secondary.id }
+            if (idx >= 0 && idx != secondaryPagerState.currentPage) {
+                secondaryPagerState.scrollToPage(idx)
+            }
+        }
+    }
+
     BoxWithConstraints(
         Modifier
             .fillMaxSize()
             .background(Color.Black),
     ) {
         val wide = maxWidth > maxHeight
-        val minRatio = 0.18f
+        val minRatio = 0.2f
         val totalWidth = constraints.maxWidth
         val totalHeight = constraints.maxHeight
 
         if (wide) {
             Row(Modifier.fillMaxSize()) {
-                SplitPane(
+                SplitPaneView(
                     item = primary,
+                    candidates = safeCandidates,
+                    pagerState = primaryPagerState,
                     repository = repository,
                     chrome = chrome,
+                    isTopPane = true,
+                    isBottomPane = true,
                     onSingleTap = { chrome = !chrome },
+                    onChange = { picker = 0 },
+                    onPickItem = { idx, item ->
+                        scope.launch { primaryPagerState.animateScrollToPage(idx) }
+                        onPickPrimary(item)
+                    },
                     modifier = Modifier
                         .weight(ratio)
                         .fillMaxHeight(),
-                    onChange = { picker = 0 },
                 )
                 SplitDivider(
                     vertical = false,
@@ -697,28 +1028,44 @@ fun SplitViewerScreen(
                         ratio = (ratio + delta / totalWidth).coerceIn(minRatio, 1f - minRatio)
                     },
                 )
-                SplitPane(
+                SplitPaneView(
                     item = secondary,
+                    candidates = safeCandidates,
+                    pagerState = if (secondary != null) secondaryPagerState else null,
                     repository = repository,
                     chrome = chrome,
+                    isTopPane = true,
+                    isBottomPane = true,
                     onSingleTap = { chrome = !chrome },
+                    onChange = { picker = 1 },
+                    onPickItem = { idx, item ->
+                        scope.launch { secondaryPagerState.animateScrollToPage(idx) }
+                        onPickSecondary(item)
+                    },
                     modifier = Modifier
                         .weight(1f - ratio)
                         .fillMaxHeight(),
-                    onChange = { picker = 1 },
                 )
             }
         } else {
             Column(Modifier.fillMaxSize()) {
-                SplitPane(
+                SplitPaneView(
                     item = primary,
+                    candidates = safeCandidates,
+                    pagerState = primaryPagerState,
                     repository = repository,
                     chrome = chrome,
+                    isTopPane = true,
+                    isBottomPane = false,
                     onSingleTap = { chrome = !chrome },
+                    onChange = { picker = 0 },
+                    onPickItem = { idx, item ->
+                        scope.launch { primaryPagerState.animateScrollToPage(idx) }
+                        onPickPrimary(item)
+                    },
                     modifier = Modifier
                         .weight(ratio)
                         .fillMaxWidth(),
-                    onChange = { picker = 0 },
                 )
                 SplitDivider(
                     vertical = true,
@@ -726,19 +1073,28 @@ fun SplitViewerScreen(
                         ratio = (ratio + delta / totalHeight).coerceIn(minRatio, 1f - minRatio)
                     },
                 )
-                SplitPane(
+                SplitPaneView(
                     item = secondary,
+                    candidates = safeCandidates,
+                    pagerState = if (secondary != null) secondaryPagerState else null,
                     repository = repository,
                     chrome = chrome,
+                    isTopPane = false,
+                    isBottomPane = true,
                     onSingleTap = { chrome = !chrome },
+                    onChange = { picker = 1 },
+                    onPickItem = { idx, item ->
+                        scope.launch { secondaryPagerState.animateScrollToPage(idx) }
+                        onPickSecondary(item)
+                    },
                     modifier = Modifier
                         .weight(1f - ratio)
                         .fillMaxWidth(),
-                    onChange = { picker = 1 },
                 )
             }
         }
 
+        // Top App Bar
         AnimatedVisibility(
             visible = chrome,
             modifier = Modifier.align(Alignment.TopCenter),
@@ -750,7 +1106,7 @@ fun SplitViewerScreen(
                     .fillMaxWidth()
                     .background(
                         Brush.verticalGradient(
-                            listOf(Color.Black.copy(alpha = 0.8f), Color.Transparent),
+                            listOf(Color.Black.copy(alpha = 0.88f), Color.Transparent),
                         ),
                     )
                     .statusBarsPadding(),
@@ -758,7 +1114,7 @@ fun SplitViewerScreen(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 4.dp, vertical = 2.dp),
+                        .padding(horizontal = 4.dp, vertical = 4.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     IconButton(onClick = onClose) {
@@ -770,12 +1126,12 @@ fun SplitViewerScreen(
                     }
                     Column(Modifier.weight(1f)) {
                         Text(
-                            text = "Split view",
-                            style = MaterialTheme.typography.titleSmall,
+                            text = "Split View",
+                            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold),
                             color = Color.White,
                         )
                         Text(
-                            text = "Drag the divider to resize",
+                            text = "Swipe left/right or tap mini-roll to switch",
                             style = MaterialTheme.typography.bodySmall,
                             color = Color.White.copy(alpha = 0.7f),
                         )
@@ -784,11 +1140,7 @@ fun SplitViewerScreen(
                         Icon(
                             imageVector = ZarcIcons.Swap,
                             contentDescription = "Swap the panes",
-                            tint = if (secondary != null) {
-                                Color.White
-                            } else {
-                                Color.White.copy(alpha = 0.3f)
-                            },
+                            tint = if (secondary != null) Color.White else Color.White.copy(alpha = 0.3f),
                         )
                     }
                 }
@@ -801,7 +1153,7 @@ fun SplitViewerScreen(
     val target = picker
     if (target != null) {
         val other = if (target == 0) secondary else primary
-        val choices = candidates.filter { it.id != other?.id }
+        val choices = safeCandidates.filter { it.id != other?.id }
         ZarcSheet(onDismiss = { picker = null }) {
             SheetHeader(
                 title = if (target == 0) "Replace the first photo" else "Choose the second photo",
@@ -848,7 +1200,6 @@ fun SplitViewerScreen(
     }
 }
 
-/** A draggable divider between the two split panes. */
 @Composable
 private fun SplitDivider(
     vertical: Boolean,
@@ -875,112 +1226,201 @@ private fun SplitDivider(
         Box(
             modifier = (if (vertical) {
                 Modifier
-                    .width(38.dp)
+                    .width(42.dp)
                     .height(4.dp)
             } else {
                 Modifier
-                    .height(38.dp)
+                    .height(42.dp)
                     .width(4.dp)
             })
                 .clip(RoundedCornerShape(2.dp))
-                .background(Color.White.copy(alpha = 0.35f)),
+                .background(Color.White.copy(alpha = 0.4f)),
         )
     }
 }
 
-/** One pane of the split viewer. */
+/** One pane of the split viewer, with media swiping and embedded mini-roll. */
 @Composable
-private fun SplitPane(
+private fun SplitPaneView(
     item: MediaItem?,
+    candidates: List<MediaItem>,
+    pagerState: androidx.compose.foundation.pager.PagerState?,
     repository: GalleryRepository,
     chrome: Boolean,
+    isTopPane: Boolean,
+    isBottomPane: Boolean,
     onSingleTap: () -> Unit,
-    modifier: Modifier = Modifier,
     onChange: () -> Unit,
+    onPickItem: (Int, MediaItem) -> Unit,
+    modifier: Modifier = Modifier,
 ) {
+    val context = LocalContext.current
+    val filmstripState = rememberLazyListState()
+
+    if (pagerState != null) {
+        LaunchedEffect(pagerState.currentPage) {
+            filmstripState.animateScrollToItem(maxOf(0, pagerState.currentPage - 2))
+        }
+    }
+
     Box(
-        modifier.background(Color(0xFF050506)),
+        modifier = modifier.background(Color.Black),
         contentAlignment = Alignment.Center,
     ) {
         if (item == null) {
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(16.dp))
+                    .clickable(onClick = onChange)
+                    .padding(24.dp),
+            ) {
                 Icon(
                     imageVector = ZarcIcons.Roll,
                     contentDescription = null,
-                    tint = Color.White.copy(alpha = 0.4f),
-                    modifier = Modifier.size(40.dp),
+                    tint = Color.White.copy(alpha = 0.5f),
+                    modifier = Modifier.size(44.dp),
                 )
-                Spacer(Modifier.height(8.dp))
+                Spacer(Modifier.height(10.dp))
                 Text(
-                    text = "Choose a second photo",
+                    text = "Tap to choose a second photo",
                     style = MaterialTheme.typography.bodyMedium,
-                    color = Color.White.copy(alpha = 0.6f),
+                    color = Color.White.copy(alpha = 0.7f),
                 )
             }
-        } else {
-            if (item.isVideo) {
-                VideoSurface(
-                    item = item,
-                    repository = repository,
-                    controlsVisible = chrome,
-                    onToggleChrome = onSingleTap,
-                    modifier = Modifier.fillMaxSize(),
-                )
-            } else {
-                ZoomableMedia(
-                    repository = repository,
-                    item = item,
-                    isPrivate = item.isPrivate,
-                    maxDimension = 1600,
-                    onSingleTap = onSingleTap,
-                    modifier = Modifier.fillMaxSize(),
-                )
+        } else if (pagerState != null) {
+            HorizontalPager(
+                state = pagerState,
+                key = { candidates.getOrNull(it)?.id ?: it },
+                modifier = Modifier.fillMaxSize(),
+            ) { page ->
+                val pageItem = candidates.getOrNull(page) ?: item
+                if (pageItem.isVideo) {
+                    VideoSurface(
+                        item = pageItem,
+                        repository = repository,
+                        controlsVisible = chrome,
+                        onToggleChrome = onSingleTap,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                } else {
+                    ZoomableMedia(
+                        repository = repository,
+                        item = pageItem,
+                        isPrivate = pageItem.isPrivate,
+                        maxDimension = 1600,
+                        onSingleTap = onSingleTap,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                }
             }
+
+            // Chrome: Item name badge (TopStart) with proper clearance so it never hides behind top header
             AnimatedVisibility(
                 visible = chrome,
                 enter = fadeIn(),
                 exit = fadeOut(),
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .then(if (isTopPane) Modifier.statusBarsPadding().padding(top = 56.dp) else Modifier)
+                    .padding(start = 12.dp, top = 8.dp),
             ) {
-                Row(
-                    modifier = Modifier
-                        .padding(10.dp)
-                        .clip(RoundedCornerShape(10.dp))
-                        .background(Color.Black.copy(alpha = 0.55f))
-                        .padding(horizontal = 9.dp, vertical = 5.dp),
-                    verticalAlignment = Alignment.CenterVertically,
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = Color.Black.copy(alpha = 0.65f),
+                    border = BorderStroke(0.5.dp, Color.White.copy(alpha = 0.2f)),
                 ) {
                     Text(
                         text = item.name,
-                        style = MaterialTheme.typography.labelSmall,
+                        style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Medium),
                         color = Color.White,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.widthIn(max = 160.dp),
+                        modifier = Modifier
+                            .padding(horizontal = 10.dp, vertical = 6.dp)
+                            .widthIn(max = 180.dp),
                     )
                 }
             }
-        }
-        AnimatedVisibility(
-            visible = chrome,
-            modifier = Modifier.align(Alignment.BottomEnd),
-            enter = fadeIn(),
-            exit = fadeOut(),
-        ) {
-            Box(
+
+            // Chrome: Change photo button (TopEnd) with proper clearance
+            AnimatedVisibility(
+                visible = chrome,
+                enter = fadeIn(),
+                exit = fadeOut(),
                 modifier = Modifier
-                    .padding(10.dp)
-                    .size(38.dp)
-                    .clip(CircleShape)
-                    .background(Color.Black.copy(alpha = 0.5f))
-                    .clickable(onClick = onChange),
-                contentAlignment = Alignment.Center,
+                    .align(Alignment.TopEnd)
+                    .then(if (isTopPane) Modifier.statusBarsPadding().padding(top = 56.dp) else Modifier)
+                    .padding(end = 12.dp, top = 8.dp),
             ) {
-                Icon(
-                    imageVector = ZarcIcons.Roll,
-                    contentDescription = "Choose another item for this pane",
-                    tint = Color.White,
-                    modifier = Modifier.size(19.dp),
-                )
+                Surface(
+                    shape = CircleShape,
+                    color = Color.Black.copy(alpha = 0.65f),
+                    border = BorderStroke(0.5.dp, Color.White.copy(alpha = 0.2f)),
+                    modifier = Modifier
+                        .size(36.dp)
+                        .clickable(onClick = onChange),
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Icon(
+                            imageVector = ZarcIcons.Roll,
+                            contentDescription = "Choose photo",
+                            tint = Color.White,
+                            modifier = Modifier.size(18.dp),
+                        )
+                    }
+                }
+            }
+
+            // Chrome: Mini-Roll (BottomCenter) anchored firmly inside this pane!
+            AnimatedVisibility(
+                visible = chrome && candidates.size > 1,
+                enter = fadeIn() + slideInVertically { it },
+                exit = fadeOut() + slideOutVertically { it },
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .then(if (isBottomPane) Modifier.navigationBarsPadding() else Modifier)
+                    .padding(bottom = 8.dp),
+            ) {
+                Surface(
+                    shape = RoundedCornerShape(16.dp),
+                    color = Color.Black.copy(alpha = 0.72f),
+                    border = BorderStroke(0.5.dp, Color.White.copy(alpha = 0.2f)),
+                    modifier = Modifier.padding(horizontal = 10.dp),
+                ) {
+                    LazyRow(
+                        state = filmstripState,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 5.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.height(48.dp),
+                    ) {
+                        itemsIndexed(candidates, key = { _, c -> c.id }) { index, tileItem ->
+                            val isSelected = index == pagerState.currentPage
+                            Box(
+                                modifier = Modifier
+                                    .size(if (isSelected) 38.dp else 32.dp)
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .then(
+                                        if (isSelected) Modifier.border(2.dp, MaterialTheme.colorScheme.primary, RoundedCornerShape(6.dp))
+                                        else Modifier.border(0.5.dp, Color.White.copy(alpha = 0.2f), RoundedCornerShape(6.dp))
+                                    )
+                                    .clickable {
+                                        ZarcHaptics.click(context)
+                                        onPickItem(index, tileItem)
+                                    },
+                            ) {
+                                MediaThumbnail(
+                                    repository = repository,
+                                    item = tileItem,
+                                    isPrivate = tileItem.isPrivate,
+                                    contentDescription = tileItem.name,
+                                    modifier = Modifier.fillMaxSize(),
+                                )
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -992,114 +1432,495 @@ private fun SplitPane(
  */
 @Composable
 fun SettingsScreen(state: GalleryUiState, viewModel: GalleryViewModel) {
-    var report by remember { mutableStateOf("") }
+    var showStealthGuide by remember { mutableStateOf(false) }
+    var showKeyRotationDialog by remember { mutableStateOf(false) }
+    var showEmptyBinDialog by remember { mutableStateOf(false) }
+    val context = LocalContext.current
 
-    LaunchedEffect(Unit) {
-        report = withContext(Dispatchers.IO) {
-            runCatching { viewModel.repository.vault.keystoreReport().summary() }
-                .getOrElse { "unavailable" }
-        }
+    if (showStealthGuide) {
+        StealthGuideDialog(onDismiss = { showStealthGuide = false })
     }
 
-    androidx.compose.foundation.lazy.LazyColumn(
-        modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(16.dp, 8.dp, 16.dp, 136.dp),
-        verticalArrangement = Arrangement.spacedBy(4.dp),
-    ) {
-        item {
-            SettingsCard("Security") {
-                SettingsRow("Key protection", report)
-                SettingsRow(
-                    "Vault objects",
-                    "${viewModel.repository.objectsDir.absolutePath}",
-                )
-                SettingsRow(
-                    "Recovery",
-                    if (viewModel.repository.vault.hasRecovery()) {
-                        "a recovery passphrase is set"
-                    } else {
-                        "no recovery passphrase - a lost device means a lost vault"
+    if (showKeyRotationDialog) {
+        AlertDialog(
+            onDismissRequest = { showKeyRotationDialog = false },
+            icon = { Icon(ZarcIcons.Shield, contentDescription = null, tint = MaterialTheme.colorScheme.primary) },
+            title = { Text("Rotate Master Key") },
+            text = {
+                Text("Generate a new cryptographic master key and re-encrypt the vault envelope. Your media will remain intact.")
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        viewModel.rotateVaultMasterKey()
+                        showKeyRotationDialog = false
                     },
+                ) {
+                    Text("Rotate Key")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showKeyRotationDialog = false }) {
+                    Text("Cancel")
+                }
+            },
+        )
+    }
+
+    if (showEmptyBinDialog) {
+        AlertDialog(
+            onDismissRequest = { showEmptyBinDialog = false },
+            icon = { Icon(ZarcIcons.Delete, contentDescription = null, tint = MaterialTheme.colorScheme.error) },
+            title = { Text("Empty Recycle Bin?") },
+            text = {
+                Text("All ${state.binnedItems.size} items in the Recycle Bin will be permanently deleted. This action cannot be undone.")
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        viewModel.emptyBin()
+                        showEmptyBinDialog = false
+                    },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error,
+                        contentColor = MaterialTheme.colorScheme.onError,
+                    ),
+                ) {
+                    Text("Empty Bin")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showEmptyBinDialog = false }) {
+                    Text("Cancel")
+                }
+            },
+        )
+    }
+
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(16.dp, 8.dp, 16.dp, 120.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp),
+    ) {
+        // Hero Header Card
+        item {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(24.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+                ),
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(20.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(68.dp)
+                            .background(
+                                MaterialTheme.colorScheme.primary.copy(alpha = 0.16f),
+                                CircleShape,
+                            ),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(
+                            imageVector = ZarcIcons.Shield,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(36.dp),
+                        )
+                    }
+                    Spacer(Modifier.height(12.dp))
+                    Text(
+                        text = "Zarc Vault",
+                        style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold),
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = "Zero-Knowledge Military-Grade Encrypted Gallery",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(14.dp))
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = MaterialTheme.colorScheme.surfaceContainerHighest,
+                        ) {
+                            Text(
+                                text = "100% Offline",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                            )
+                        }
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = MaterialTheme.colorScheme.surfaceContainerHighest,
+                        ) {
+                            Text(
+                                text = "XChaCha20-Poly1305",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        // App Security & Lock
+        item {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(20.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceContainer,
+                ),
+            ) {
+                Column(Modifier.padding(16.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = ZarcIcons.Lock,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(20.dp),
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            text = "Security & App Lock",
+                            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold),
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                    }
+                    Spacer(Modifier.height(12.dp))
+
+                    SettingsToggle(
+                        title = "Biometric app lock",
+                        subtitle = "Require fingerprint, face, or screen lock credentials to open Zarc",
+                        checked = state.appLockEnabled,
+                        onCheckedChange = viewModel::setAppLockEnabled,
+                    )
+
+                    HorizontalDivider(
+                        modifier = Modifier.padding(vertical = 8.dp),
+                        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
+                    )
+
+                    SettingsToggle(
+                        title = "Stealth Dynamic PIN lock",
+                        subtitle = "Require 4-digit PIN based on current time (Minute + Reversed Hour)",
+                        checked = state.stealthLockEnabled,
+                        onCheckedChange = viewModel::setStealthLockEnabled,
+                    )
+
+                    Spacer(Modifier.height(4.dp))
+
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { showStealthGuide = true }
+                            .padding(vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(
+                            imageVector = ZarcIcons.Info,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(18.dp),
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            text = "How Stealth Dynamic PIN works",
+                            style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Medium),
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                    }
+                }
+            }
+        }
+
+        // Vault Storage & Management
+        item {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(20.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceContainer,
+                ),
+            ) {
+                Column(Modifier.padding(16.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = ZarcIcons.Roll,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(20.dp),
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            text = "Storage & Vault",
+                            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold),
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                    }
+                    Spacer(Modifier.height(12.dp))
+
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text("Total Encrypted Media", style = MaterialTheme.typography.bodyMedium)
+                            Text(
+                                text = "${state.roll.size} items (${state.index.albums.size} albums)",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+
+                    HorizontalDivider(
+                        modifier = Modifier.padding(vertical = 8.dp),
+                        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
+                    )
+
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text("Recycle Bin", style = MaterialTheme.typography.bodyMedium)
+                            Text(
+                                text = "${state.binnedItems.size} items pending 30-day deletion",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        if (state.binnedItems.isNotEmpty()) {
+                            TextButton(onClick = { showEmptyBinDialog = true }) {
+                                Text("Empty", color = MaterialTheme.colorScheme.error)
+                            }
+                        }
+                    }
+
+                    HorizontalDivider(
+                        modifier = Modifier.padding(vertical = 8.dp),
+                        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
+                    )
+
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { showKeyRotationDialog = true }
+                            .padding(vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text("Rotate Master Key", style = MaterialTheme.typography.bodyMedium)
+                            Text(
+                                text = "Re-encrypt vault key envelope with a new master key",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        // Developer Credits Card
+        item {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(20.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceContainer,
+                ),
+            ) {
+                Column(Modifier.padding(16.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = ZarcIcons.Star,
+                            contentDescription = null,
+                            tint = Color(0xFFFFC44D),
+                            modifier = Modifier.size(20.dp),
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            text = "Developer Credits",
+                            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold),
+                            color = MaterialTheme.colorScheme.onSurface,
+                        )
+                    }
+                    Spacer(Modifier.height(12.dp))
+
+                    Text(
+                        text = "Developed by Meet Mistry",
+                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                    )
+                    Spacer(Modifier.height(2.dp))
+                    Text(
+                        text = "Crafted with security, privacy, and performance in mind.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+
+                    Spacer(Modifier.height(14.dp))
+
+                    // Email Link
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                ZarcHaptics.click(context)
+                                runCatching {
+                                    val intent = Intent(Intent.ACTION_SENDTO, Uri.parse("mailto:meetzarc@gmail.com"))
+                                    context.startActivity(intent)
+                                }
+                            },
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text("✉", fontSize = 16.sp)
+                            Spacer(Modifier.width(12.dp))
+                            Column(Modifier.weight(1f)) {
+                                Text("Email", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                Text("meetzarc@gmail.com", style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Medium))
+                            }
+                            Icon(ZarcIcons.OpenWith, contentDescription = null, modifier = Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
+
+                    Spacer(Modifier.height(8.dp))
+
+                    // Website Link
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                ZarcHaptics.click(context)
+                                runCatching {
+                                    val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://meetmistry.vercel.app"))
+                                    context.startActivity(intent)
+                                }
+                            },
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text("🌐", fontSize = 16.sp)
+                            Spacer(Modifier.width(12.dp))
+                            Column(Modifier.weight(1f)) {
+                                Text("Portfolio / Website", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                Text("https://meetmistry.vercel.app", style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Medium))
+                            }
+                            Icon(ZarcIcons.OpenWith, contentDescription = null, modifier = Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
+
+                    Spacer(Modifier.height(8.dp))
+
+                    // GitHub Link
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                ZarcHaptics.click(context)
+                                runCatching {
+                                    val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/MZarc"))
+                                    context.startActivity(intent)
+                                }
+                            },
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text("💻", fontSize = 16.sp)
+                            Spacer(Modifier.width(12.dp))
+                            Column(Modifier.weight(1f)) {
+                                Text("GitHub", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                Text("Github/MZarc", style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Medium))
+                            }
+                            Icon(ZarcIcons.OpenWith, contentDescription = null, modifier = Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
+                }
+            }
+        }
+
+        // Privacy Guarantee Footer
+        item {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 8.dp, vertical = 12.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                Text(
+                    text = "Zarc keeps all media encrypted on this device with zero network traffic. Your privacy is absolute.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
                 )
-                SettingsRow(
-                    "Private area",
-                    if (state.privateAvailable) "set up" else "not set up",
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    text = "Zarc v1.0.0",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
                 )
             }
         }
-        item {
-            SettingsCard("Maintenance") {
-                SettingsAction("Import sample media") { viewModel.importSamples() }
-                SettingsAction("Set up the private area") { viewModel.enablePrivateArea() }
-                SettingsAction("Rotate the vault master key") { viewModel.rotateVaultMasterKey() }
-                SettingsAction("Empty the recycle bin") { viewModel.emptyBin() }
-            }
-        }
-        item {
-            SettingsCard("About") {
-                SettingsRow("Engine", "libsodium secretstream, XChaCha20-Poly1305")
-                SettingsRow("Developer tools", "the Security Lab holds the on-device tests")
-            }
-        }
-        item {
-            HorizontalDivider(Modifier.padding(vertical = 12.dp))
+    }
+}
+
+/** One toggle switch settings row. */
+@Composable
+private fun SettingsToggle(
+    title: String,
+    subtitle: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { onCheckedChange(!checked) }
+            .padding(vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(title, style = MaterialTheme.typography.bodyMedium)
             Text(
-                text = "Zarc keeps your media encrypted in the application private storage. " +
-                    "Nothing is uploaded, and the app holds no network permission.",
+                text = subtitle,
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
-    }
-}
-
-/** A titled card of settings. */
-@Composable
-private fun SettingsCard(title: String, content: @Composable () -> Unit) {
-    androidx.compose.material3.Card(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 8.dp),
-        shape = RoundedCornerShape(18.dp),
-        colors = androidx.compose.material3.CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceContainer,
-        ),
-    ) {
-        Column(Modifier.padding(16.dp)) {
-            Text(
-                text = title,
-                style = MaterialTheme.typography.titleSmall,
-                color = MaterialTheme.colorScheme.primary,
-            )
-            Spacer(Modifier.height(8.dp))
-            content()
-        }
-    }
-}
-
-/** One read only settings row. */
-@Composable
-private fun SettingsRow(label: String, value: String) {
-    Column(Modifier.padding(vertical = 6.dp)) {
-        Text(label, style = MaterialTheme.typography.bodyMedium)
-        Text(
-            text = value,
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        androidx.compose.material3.Switch(
+            checked = checked,
+            onCheckedChange = onCheckedChange,
         )
-    }
-}
-
-/** One actionable settings row. */
-@Composable
-private fun SettingsAction(label: String, onClick: () -> Unit) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable { onClick() }
-            .padding(vertical = 10.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(label, style = MaterialTheme.typography.bodyLarge)
     }
 }

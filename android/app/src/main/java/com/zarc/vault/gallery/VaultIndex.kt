@@ -35,6 +35,8 @@ data class MediaItem(
     val isPrivate: Boolean = false,
     /** Whether the item is in the recycle bin. */
     val isDeleted: Boolean = false,
+    /** When the item was moved to the recycle bin in milliseconds, 0 if not deleted. */
+    val deletedAt: Long = 0L,
 ) {
     /** Whether the item is a video. */
     val isVideo: Boolean get() = mime.startsWith("video/")
@@ -56,6 +58,7 @@ data class Album(
     val name: String,
     /** Whether the album was created by the system (camera, screenshots, ...). */
     val system: Boolean = false,
+    val coverId: String? = null,
 )
 
 /**
@@ -77,7 +80,11 @@ class VaultIndex(
     val deleted: List<MediaItem> get() = items.filter { it.isDeleted }
 
     /** The items of one album. */
-    fun inAlbum(albumId: String): List<MediaItem> = visible.filter { it.albumId == albumId }
+    fun inAlbum(albumId: String): List<MediaItem> = when (albumId) {
+        ALBUM_RECENTS -> visible.sortedByDescending { it.takenAt }
+        ALBUM_FAVOURITES -> visible.filter { it.isFavorite }
+        else -> visible.filter { it.albumId == albumId }
+    }
 
     /** Look an item up by its object id. */
     fun find(id: String): MediaItem? = items.firstOrNull { it.id == id }
@@ -100,6 +107,7 @@ class VaultIndex(
                     put("favorite", item.isFavorite)
                     put("private", item.isPrivate)
                     put("deleted", item.isDeleted)
+                    put("deletedAt", item.deletedAt)
                 })
             }
         })
@@ -109,6 +117,7 @@ class VaultIndex(
                     put("id", album.id)
                     put("name", album.name)
                     put("system", album.system)
+                    if (album.coverId != null) put("coverId", album.coverId)
                 })
             }
         })
@@ -125,8 +134,11 @@ class VaultIndex(
      */
     fun normalised(): VaultIndex {
         albums.removeAll { it.id in LEGACY_ALBUM_IDS }
+        if (albums.none { it.id == ALBUM_RECENTS }) {
+            albums.add(0, RECENTS_ALBUM)
+        }
         if (albums.none { it.id == ALBUM_FAVOURITES }) {
-            albums.add(0, FAVOURITE_ALBUM)
+            albums.add(if (albums.firstOrNull()?.id == ALBUM_RECENTS) 1 else 0, FAVOURITE_ALBUM)
         }
         val knownAlbums = albums.mapTo(mutableSetOf()) { it.id }
         items.replaceAll { item ->
@@ -148,17 +160,23 @@ class VaultIndex(
         /** The version of the index format. */
         const val VERSION = 1
 
+        /** The id of the built-in recent album. */
+        const val ALBUM_RECENTS = "recents"
+
         /** The id of the built-in favourite album. */
         const val ALBUM_FAVOURITES = "favourites"
 
         /** The album id of an item that is only in the roll. */
         const val ALBUM_NONE = ""
 
-        /** The id of the favourite album. It is always present. */
+        /** The built-in recent album. It is always present. */
+        val RECENTS_ALBUM = Album(ALBUM_RECENTS, "Recent", system = true)
+
+        /** The built-in favourite album. It is always present. */
         val FAVOURITE_ALBUM = Album(ALBUM_FAVOURITES, "Favourite", system = true)
 
         /** The default albums of a fresh vault. */
-        val DEFAULT_ALBUMS = listOf(FAVOURITE_ALBUM)
+        val DEFAULT_ALBUMS = listOf(RECENTS_ALBUM, FAVOURITE_ALBUM)
 
         // The system albums of the first index version. They exist only so
         // that an index written by an older build can be migrated.
@@ -194,6 +212,9 @@ class VaultIndex(
                         isFavorite = item.optBoolean("favorite", false),
                         isPrivate = item.optBoolean("private", false),
                         isDeleted = item.optBoolean("deleted", false),
+                        deletedAt = item.optLong("deletedAt", 0L).let {
+                            if (it == 0L && item.optBoolean("deleted", false)) item.optLong("taken", System.currentTimeMillis()) else it
+                        },
                     ),
                 )
             }
@@ -205,6 +226,7 @@ class VaultIndex(
                         id = album.getString("id"),
                         name = album.optString("name", "Album"),
                         system = album.optBoolean("system", false),
+                        coverId = if (album.has("coverId") && !album.isNull("coverId")) album.getString("coverId") else null,
                     ),
                 )
             }

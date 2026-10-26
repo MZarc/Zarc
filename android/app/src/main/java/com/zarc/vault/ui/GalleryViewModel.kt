@@ -111,7 +111,7 @@ data class GalleryUiState(
     /** The number of items currently materialised in a grid. */
     val pageLimit: Int = PAGE_SIZE,
     /** The number of columns of the media grid, between 2 and 6. */
-    val gridColumns: Int = 3,
+    val gridColumns: Int = 4,
     /** Whether the private area is unlocked. */
     val privateUnlocked: Boolean = false,
     /** Whether the private area has been set up. */
@@ -120,6 +120,16 @@ data class GalleryUiState(
     val message: String? = null,
     /** Whether a long running operation is running. */
     val busy: Boolean = false,
+    /** A descriptive status message for the loader. */
+    val busyMessage: String? = null,
+    /** Whether app-level biometric lock is enabled. */
+    val appLockEnabled: Boolean = false,
+    /** Whether stealth time-based PIN is enabled for the whole app (default false). */
+    val stealthLockEnabled: Boolean = false,
+    /** Whether the app-level stealth PIN dialog is currently open. */
+    val appStealthDialogOpen: Boolean = false,
+    /** Whether viewing the private recycle bin inside the private area. */
+    val inPrivateBin: Boolean = false,
 ) {
     /** The items of the roll after the filter and the search. */
     val roll: List<MediaItem>
@@ -155,6 +165,10 @@ data class GalleryUiState(
     val binnedItems: List<MediaItem>
         get() = index.deleted.matching(query).orderedBy(sort)
 
+    /** The deleted items in the private recycle bin. */
+    val privateBinnedItems: List<MediaItem>
+        get() = privateIndex.deleted.matching(query).orderedBy(sort)
+
     /** The roll, materialised up to the current page limit. */
     val visibleRoll: List<MediaItem> get() = roll.take(pageLimit)
 
@@ -167,12 +181,15 @@ data class GalleryUiState(
     /** The binned items, materialised up to the current page limit. */
     val visibleBinnedItems: List<MediaItem> get() = binnedItems.take(pageLimit)
 
+    /** The private binned items, materialised up to the current page limit. */
+    val visiblePrivateBinnedItems: List<MediaItem> get() = privateBinnedItems.take(pageLimit)
+
     /** The number of items in the current section, across every page. */
     val activeTotal: Int
         get() = when (tab) {
             GalleryTab.PHOTOS -> roll.size
             GalleryTab.ALBUMS -> if (albumId != null) albumItems.size else 0
-            GalleryTab.PRIVATE -> privateItems.size
+            GalleryTab.PRIVATE -> if (inPrivateBin) privateBinnedItems.size else privateItems.size
             GalleryTab.BIN -> binnedItems.size
             GalleryTab.SETTINGS -> 0
         }
@@ -180,9 +197,17 @@ data class GalleryUiState(
     /** Whether another page can be requested. */
     val hasMore: Boolean get() = activeTotal > pageLimit
 
-    /** The items the split viewer can offer for the open item. */
+    /** The items the viewer can swipe through and offer for the split pane. */
     val viewerCandidates: List<MediaItem>
-        get() = if (viewerItem?.isPrivate == true) privateItems else roll
+        get() = when {
+            viewerItem?.isDeleted == true && viewerItem?.isPrivate == true -> privateBinnedItems
+            viewerItem?.isDeleted == true -> binnedItems
+            viewerItem?.isPrivate == true -> if (inPrivateBin) privateBinnedItems else privateItems
+            tab == GalleryTab.PRIVATE && inPrivateBin -> privateBinnedItems
+            tab == GalleryTab.PRIVATE -> privateItems
+            albumId != null -> albumItems
+            else -> roll
+        }
 
     /** Whether the user interface is in selection mode. */
     val selecting: Boolean get() = selection.isNotEmpty()
@@ -209,7 +234,9 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
 
     private val _state = MutableStateFlow(
         GalleryUiState(
-            gridColumns = preferences.getInt("grid.columns", 3).coerceIn(2, 6),
+            gridColumns = preferences.getInt("grid.columns", 4).coerceIn(2, 6),
+            appLockEnabled = preferences.getBoolean("security.app_lock", false),
+            stealthLockEnabled = preferences.getBoolean("security.stealth_lock", false),
         ),
     )
     /** The observable state. */
@@ -220,10 +247,11 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         refresh()
     }
 
-    /** Reload the index from the vault. */
+    /** Reload the index from the vault. Also automatically purges items in bin >= 30 days. */
     fun refresh() {
         viewModelScope.launch {
             val current = _state.value
+            withContext(Dispatchers.IO) { repository.purgeExpiredBinnedItems() }
             val index = withContext(Dispatchers.IO) { repository.loadIndex() }
             val privateIndex = withContext(Dispatchers.IO) {
                 val key = repository.unlockedPrivateKey
@@ -245,15 +273,42 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                     if (item.isPrivate) privateIndex.find(item.id) else index.find(item.id)
                 },
                 albumId = current.albumId?.takeIf { id -> index.albums.any { it.id == id } },
-                selection = current.selection.filterTo(mutableSetOf()) { index.find(it) != null },
+                selection = current.selection.filterTo(mutableSetOf()) { index.find(it) != null || privateIndex.find(it) != null },
             )
         }
     }
 
+    /** Toggle app-level biometric lock. */
+    fun setAppLockEnabled(enabled: Boolean) {
+        preferences.edit().putBoolean("security.app_lock", enabled).apply()
+        _state.value = _state.value.copy(appLockEnabled = enabled)
+    }
+
+    /** Toggle stealth dynamic time-based PIN protection for private vault. */
+    fun setStealthLockEnabled(enabled: Boolean) {
+        preferences.edit().putBoolean("security.stealth_lock", enabled).apply()
+        _state.value = _state.value.copy(stealthLockEnabled = enabled)
+    }
+
+    /** Close the current album and return to the albums list. */
+    fun closeAlbum() {
+        _state.value = _state.value.copy(
+            albumId = null,
+            selection = emptySet(),
+            query = "",
+            searchOpen = false,
+            pageLimit = PAGE_SIZE,
+        )
+    }
+
     /** Switch the tab. */
     fun selectTab(tab: GalleryTab) {
+        if (_state.value.tab == GalleryTab.PRIVATE && tab != GalleryTab.PRIVATE) {
+            lockPrivateArea()
+        }
         _state.value = _state.value.copy(
             tab = tab,
+            inPrivateBin = false,
             albumId = null,
             selection = emptySet(),
             query = "",
@@ -265,8 +320,12 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
 
     /** Return to the roll from any section, viewer or nested screen. */
     fun goHome() {
+        if (_state.value.tab == GalleryTab.PRIVATE) {
+            lockPrivateArea()
+        }
         _state.value = _state.value.copy(
             tab = GalleryTab.PHOTOS,
+            inPrivateBin = false,
             albumId = null,
             selection = emptySet(),
             query = "",
@@ -500,12 +559,14 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
 
     /** Move a single item that is open in the viewer into the bin. */
     fun binItem(item: MediaItem) {
-        if (item.isPrivate) {
-            message("private items cannot be moved to the bin")
-            return
-        }
         viewModelScope.launch {
-            withContext(Dispatchers.IO) { repository.moveToBin(listOf(item.id)) }
+            withContext(Dispatchers.IO) {
+                if (item.isPrivate) {
+                    repository.movePrivateToBin(listOf(item.id))
+                } else {
+                    repository.moveToBin(listOf(item.id))
+                }
+            }
             refresh()
         }
     }
@@ -523,24 +584,45 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     /** Import a document into the vault. */
     fun import(uri: Uri, albumId: String = VaultIndex.ALBUM_NONE, isPrivate: Boolean = false) {
         viewModelScope.launch {
-            _state.value = _state.value.copy(busy = true)
+            _state.value = _state.value.copy(busy = true, busyMessage = "Encrypting and storing media...")
             val result = withContext(Dispatchers.IO) {
                 runCatching { repository.import(uri, albumId, isPrivate) }
             }
-            _state.value = _state.value.copy(busy = false)
+            _state.value = _state.value.copy(busy = false, busyMessage = null)
             result.onSuccess { refresh() }
                 .onFailure { message("the import failed: ${it.message}") }
+        }
+    }
+
+    /** Import multiple documents into the vault. */
+    fun importMultiple(uris: List<Uri>, albumId: String = VaultIndex.ALBUM_NONE, isPrivate: Boolean = false) {
+        if (uris.isEmpty()) return
+        viewModelScope.launch {
+            _state.value = _state.value.copy(busy = true, busyMessage = "Importing 1 of ${uris.size}...")
+            var count = 0
+            withContext(Dispatchers.IO) {
+                uris.forEachIndexed { i, uri ->
+                    _state.value = _state.value.copy(busyMessage = "Importing ${i + 1} of ${uris.size}...")
+                    runCatching {
+                        repository.import(uri, albumId, isPrivate)
+                        count++
+                    }
+                }
+            }
+            _state.value = _state.value.copy(busy = false, busyMessage = null)
+            refresh()
+            message(if (count == 1) "1 item imported into vault" else "$count items imported into vault")
         }
     }
 
     /** Import synthetic sample media. */
     fun importSamples(count: Int = 12) {
         viewModelScope.launch {
-            _state.value = _state.value.copy(busy = true)
+            _state.value = _state.value.copy(busy = true, busyMessage = "Generating $count sample items...")
             val result = withContext(Dispatchers.IO) {
                 runCatching { repository.importSamples(count) }
             }
-            _state.value = _state.value.copy(busy = false)
+            _state.value = _state.value.copy(busy = false, busyMessage = null)
             result.onSuccess { refresh(); message("${it.size} sample items imported") }
                 .onFailure { message("the import failed: ${it.message}") }
         }
@@ -574,8 +656,10 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     fun moveSelectionToAlbum(albumId: String) {
         val ids = _state.value.selection.toList()
         viewModelScope.launch {
+            _state.value = _state.value.copy(busy = true, busyMessage = "Moving to album...")
             withContext(Dispatchers.IO) { repository.moveToAlbum(ids, albumId) }
             clearSelection()
+            _state.value = _state.value.copy(busy = false, busyMessage = null)
             refresh()
         }
     }
@@ -584,8 +668,10 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     fun moveSelectionToBin() {
         val ids = _state.value.selection.toList()
         viewModelScope.launch {
+            _state.value = _state.value.copy(busy = true, busyMessage = "Moving to recycle bin...")
             withContext(Dispatchers.IO) { repository.moveToBin(ids) }
             clearSelection()
+            _state.value = _state.value.copy(busy = false, busyMessage = null)
             refresh()
         }
     }
@@ -594,8 +680,10 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     fun restoreSelection() {
         val ids = _state.value.selection.toList()
         viewModelScope.launch {
+            _state.value = _state.value.copy(busy = true, busyMessage = "Restoring items...")
             withContext(Dispatchers.IO) { repository.restoreFromBin(ids) }
             clearSelection()
+            _state.value = _state.value.copy(busy = false, busyMessage = null)
             refresh()
         }
     }
@@ -604,8 +692,10 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     fun deleteSelectionForever() {
         val ids = _state.value.selection.toList()
         viewModelScope.launch {
+            _state.value = _state.value.copy(busy = true, busyMessage = "Permanently deleting...")
             withContext(Dispatchers.IO) { repository.deleteForever(ids) }
             clearSelection()
+            _state.value = _state.value.copy(busy = false, busyMessage = null)
             refresh()
         }
     }
@@ -613,17 +703,105 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     /** Empty the recycle bin. */
     fun emptyBin() {
         viewModelScope.launch {
+            _state.value = _state.value.copy(busy = true, busyMessage = "Emptying recycle bin...")
             withContext(Dispatchers.IO) { repository.emptyBin() }
+            _state.value = _state.value.copy(busy = false, busyMessage = null)
             refresh()
+        }
+    }
+
+    /** Set album cover image. */
+    fun setAlbumCover(albumId: String, mediaId: String?) {
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) { repository.setAlbumCover(albumId, mediaId) }
+            refresh()
+            message("Album cover updated")
+        }
+    }
+
+    /** Move selected items into the private vault. */
+    fun moveSelectionToPrivate() {
+        val ids = _state.value.selection.toList()
+        viewModelScope.launch {
+            _state.value = _state.value.copy(busy = true, busyMessage = "Moving to Private Vault...")
+            withContext(Dispatchers.IO) { repository.moveToPrivate(ids) }
+            clearSelection()
+            _state.value = _state.value.copy(busy = false, busyMessage = null)
+            refresh()
+            message(if (ids.size == 1) "1 item moved to Private Vault" else "${ids.size} items moved to Private Vault")
+        }
+    }
+
+    /** Move single item to private vault. */
+    fun moveItemToPrivate(item: MediaItem) {
+        viewModelScope.launch {
+            _state.value = _state.value.copy(busy = true, busyMessage = "Moving to Private Vault...")
+            withContext(Dispatchers.IO) { repository.moveToPrivate(listOf(item.id)) }
+            closeViewer()
+            _state.value = _state.value.copy(busy = false, busyMessage = null)
+            refresh()
+            message("Moved to Private Vault")
+        }
+    }
+
+    /** Move private selection to private bin. */
+    fun movePrivateSelectionToBin() {
+        val ids = _state.value.selection.toList()
+        viewModelScope.launch {
+            _state.value = _state.value.copy(busy = true, busyMessage = "Moving to recycle bin...")
+            withContext(Dispatchers.IO) { repository.movePrivateToBin(ids) }
+            clearSelection()
+            _state.value = _state.value.copy(busy = false, busyMessage = null)
+            refresh()
+        }
+    }
+
+    /** Restore private selection from private bin. */
+    fun restorePrivateSelection() {
+        val ids = _state.value.selection.toList()
+        viewModelScope.launch {
+            _state.value = _state.value.copy(busy = true, busyMessage = "Restoring private items...")
+            withContext(Dispatchers.IO) { repository.restorePrivateFromBin(ids) }
+            clearSelection()
+            _state.value = _state.value.copy(busy = false, busyMessage = null)
+            refresh()
+        }
+    }
+
+    /** Permanently delete private selection. */
+    fun deletePrivateSelectionForever() {
+        val ids = _state.value.selection.toList()
+        viewModelScope.launch {
+            _state.value = _state.value.copy(busy = true, busyMessage = "Permanently deleting...")
+            withContext(Dispatchers.IO) { repository.deletePrivateForever(ids) }
+            clearSelection()
+            _state.value = _state.value.copy(busy = false, busyMessage = null)
+            refresh()
+        }
+    }
+
+    /** Move a single item (public or private) to recycle bin. */
+    /** Move items from private vault back to public photos. */
+    fun moveSelectionOutOfPrivate() {
+        val ids = _state.value.selection.toList()
+        viewModelScope.launch {
+            _state.value = _state.value.copy(busy = true, busyMessage = "Moving to Photos...")
+            withContext(Dispatchers.IO) { repository.moveOutOfPrivate(ids) }
+            clearSelection()
+            _state.value = _state.value.copy(busy = false, busyMessage = null)
+            refresh()
+            message(if (ids.size == 1) "1 item moved to Photos" else "${ids.size} items moved to Photos")
         }
     }
 
     /** Re-encrypt an item with a fresh data key. */
     fun reencrypt(item: MediaItem) {
         viewModelScope.launch {
+            _state.value = _state.value.copy(busy = true, busyMessage = "Re-encrypting object...")
             val result = withContext(Dispatchers.IO) {
                 runCatching { repository.reencryptObject(item) }
             }
+            _state.value = _state.value.copy(busy = false, busyMessage = null)
             result.onSuccess { message("the item was encrypted again with a fresh key") }
                 .onFailure { message("the re-encryption failed: ${it.message}") }
         }
@@ -632,9 +810,11 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     /** Rotate the vault master key. */
     fun rotateVaultMasterKey() {
         viewModelScope.launch {
+            _state.value = _state.value.copy(busy = true, busyMessage = "Rotating master key...")
             val result = withContext(Dispatchers.IO) {
                 runCatching { repository.vault.rotateVaultMasterKey() }
             }
+            _state.value = _state.value.copy(busy = false, busyMessage = null)
             result.onSuccess { message("$it objects were re-wrapped under a new key") }
                 .onFailure { message("the rotation failed: ${it.message}") }
         }
@@ -643,14 +823,26 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     /** Set up the private area. */
     fun enablePrivateArea() {
         viewModelScope.launch {
+            _state.value = _state.value.copy(busy = true, busyMessage = "Setting up Private Vault...")
             val result = withContext(Dispatchers.IO) {
                 runCatching { repository.enablePrivateArea() }
             }
+            _state.value = _state.value.copy(busy = false, busyMessage = null)
             result.onSuccess {
                 refresh()
-                message(if (it) "the private area is ready" else "the private area is not available")
-            }.onFailure { message("the private area could not be set up: ${it.message}") }
+                message(if (it) "Private Vault is ready" else "Private Vault could not be enabled")
+            }.onFailure { message("Private Vault setup failed: ${it.message}") }
         }
+    }
+
+    /** Show app-level stealth PIN prompt. */
+    fun showAppStealthDialog() {
+        _state.value = _state.value.copy(appStealthDialogOpen = true)
+    }
+
+    /** Dismiss app-level stealth PIN prompt. */
+    fun dismissAppStealthDialog() {
+        _state.value = _state.value.copy(appStealthDialogOpen = false)
     }
 
     /** Unlock the private area with the key that the biometric released. */
@@ -658,7 +850,11 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         viewModelScope.launch {
             val index = withContext(Dispatchers.IO) { repository.loadPrivateIndex(key) }
             repository.unlockedPrivateKey = key
-            _state.value = _state.value.copy(privateIndex = index, privateUnlocked = true)
+            _state.value = _state.value.copy(
+                privateIndex = index,
+                privateUnlocked = true,
+                tab = GalleryTab.PRIVATE,
+            )
         }
     }
 
@@ -669,7 +865,40 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         ThumbnailCache.clear()
         ViewerImageCache.clear()
         repository.clearViewerCache()
-        _state.value = _state.value.copy(privateUnlocked = false, privateIndex = VaultIndex())
+        _state.value = _state.value.copy(
+            privateUnlocked = false,
+            inPrivateBin = false,
+            privateIndex = VaultIndex(),
+            tab = if (_state.value.tab == GalleryTab.PRIVATE) GalleryTab.PHOTOS else _state.value.tab,
+        )
+    }
+
+    fun openPrivateBin() {
+        _state.value = _state.value.copy(inPrivateBin = true, selection = emptySet())
+    }
+
+    fun closePrivateBin() {
+        _state.value = _state.value.copy(inPrivateBin = false, selection = emptySet())
+    }
+
+    fun selectBatch(ids: Collection<String>) {
+        _state.value = _state.value.copy(selection = _state.value.selection + ids)
+    }
+
+    fun deselectBatch(ids: Collection<String>) {
+        _state.value = _state.value.copy(selection = _state.value.selection - ids.toSet())
+    }
+
+    fun emptyPrivateBin() {
+        val ids = _state.value.privateBinnedItems.map { it.id }
+        if (ids.isEmpty()) return
+        viewModelScope.launch {
+            _state.value = _state.value.copy(busy = true, busyMessage = "Emptying private bin...")
+            withContext(Dispatchers.IO) { repository.deletePrivateForever(ids) }
+            _state.value = _state.value.copy(busy = false, busyMessage = null)
+            refresh()
+            message("private bin emptied")
+        }
     }
 
     /** The albums of the current area. */

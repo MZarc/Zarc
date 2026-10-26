@@ -194,7 +194,8 @@ class GalleryInstrumentedTest {
     @Test
     fun theFavouriteAlbumExistsOnAFreshVault() {
         val index = gallery.loadIndex()
-        assertEquals(1, index.albums.size)
+        assertEquals(2, index.albums.size)
+        assertTrue(index.albums.any { it.id == VaultIndex.ALBUM_RECENTS })
         assertTrue(index.albums.any { it.id == VaultIndex.ALBUM_FAVOURITES })
     }
 
@@ -245,7 +246,8 @@ class GalleryInstrumentedTest {
         gallery.saveIndex(legacy)
 
         val migrated = gallery.loadIndex()
-        assertEquals(1, migrated.albums.size)
+        assertEquals(2, migrated.albums.size)
+        assertTrue(migrated.albums.any { it.id == VaultIndex.ALBUM_RECENTS })
         assertTrue(migrated.albums.any { it.id == VaultIndex.ALBUM_FAVOURITES })
         assertEquals(VaultIndex.ALBUM_NONE, migrated.items.first().albumId)
     }

@@ -6,6 +6,8 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -16,9 +18,11 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.zarc.vault.gallery.GalleryRepository
 import com.zarc.vault.gallery.MediaItem
 import com.zarc.vault.ui.theme.ZarcPalette
@@ -26,13 +30,15 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
 /**
- * A small in-memory cache of the decrypted thumbnails.
+ * An optimized in-memory cache of the decrypted thumbnails.
  *
- * The thumbnails are decrypted on demand and kept in memory only. Nothing is
- * written to the cache directory in the clear.
+ * Thumbnails use RGB_565 to cut memory footprint in half, allowing hundreds of
+ * thumbnails to remain cached simultaneously for 60/120fps stutter-free scrolling.
  */
 object ThumbnailCache {
-    private val cache = object : LruCache<String, android.graphics.Bitmap>(24 * 1024 * 1024) {
+    private val maxBytes = (Runtime.getRuntime().maxMemory() / 4).toInt().coerceIn(32 * 1024 * 1024, 160 * 1024 * 1024)
+
+    private val cache = object : LruCache<String, android.graphics.Bitmap>(maxBytes) {
         override fun sizeOf(key: String, value: android.graphics.Bitmap): Int = value.byteCount
     }
 
@@ -61,6 +67,7 @@ fun MediaThumbnail(
     isPrivate: Boolean,
     modifier: Modifier = Modifier,
     contentDescription: String? = null,
+    daysLeftBadge: String? = null,
 ) {
     var bitmap by remember(item.id) { mutableStateOf(ThumbnailCache.get(item.id)) }
 
@@ -69,7 +76,10 @@ fun MediaThumbnail(
             val bytes = withContext(Dispatchers.IO) { repository.readThumbnail(isPrivate, item.id) }
             if (bytes != null) {
                 val decoded = withContext(Dispatchers.IO) {
-                    BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                    val opts = BitmapFactory.Options().apply {
+                        inPreferredConfig = android.graphics.Bitmap.Config.RGB_565
+                    }
+                    BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
                 }
                 if (decoded != null) {
                     ThumbnailCache.put(item.id, decoded)
@@ -97,6 +107,39 @@ fun MediaThumbnail(
                 style = MaterialTheme.typography.titleMedium,
                 color = if (item.isVideo) ZarcPalette.videos else ZarcPalette.photos,
             )
+        }
+
+        if (daysLeftBadge != null) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(5.dp)
+                    .background(Color(0xCC111318), RoundedCornerShape(6.dp))
+                    .padding(horizontal = 6.dp, vertical = 2.dp),
+            ) {
+                Text(
+                    text = daysLeftBadge,
+                    color = Color(0xFFFFB4AB),
+                    fontSize = 11.sp,
+                    style = MaterialTheme.typography.labelSmall,
+                )
+            }
+        }
+
+        if (item.isVideo) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(5.dp)
+                    .background(Color(0x99000000), RoundedCornerShape(4.dp))
+                    .padding(horizontal = 4.dp, vertical = 1.dp),
+            ) {
+                Text(
+                    text = "▶",
+                    color = Color.White,
+                    fontSize = 10.sp,
+                )
+            }
         }
     }
 }

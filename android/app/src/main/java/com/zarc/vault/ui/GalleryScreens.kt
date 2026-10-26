@@ -13,6 +13,8 @@ import androidx.compose.animation.scaleOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.border
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
@@ -21,6 +23,22 @@ import androidx.compose.foundation.gestures.transformable
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.lazy.grid.GridItemSpan
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
+import androidx.compose.ui.text.font.FontWeight
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -41,6 +59,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -71,6 +90,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -94,6 +114,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.foundation.layout.widthIn
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.zarc.vault.gallery.Album
 import com.zarc.vault.gallery.GalleryRepository
@@ -133,6 +155,11 @@ private fun formatDuration(milliseconds: Long): String {
  * in the middle and a floating navigation bar over the content.
  */
 /** The item or the selection that an edit dialog is acting on. */
+private data class DeleteSelectionTarget(
+    val ids: List<String>,
+    val isPermanent: Boolean,
+)
+
 private data class EditTarget(
     val ids: List<String>,
     val initialName: String,
@@ -147,6 +174,7 @@ private data class EditTarget(
 fun GalleryApp(
     viewModel: GalleryViewModel,
     onImport: () -> Unit,
+    onImportPrivate: () -> Unit = onImport,
     onOpenWith: (MediaItem) -> Unit,
     onUnlockPrivate: () -> Unit,
 ) {
@@ -155,9 +183,12 @@ fun GalleryApp(
     var menuOpen by remember { mutableStateOf(false) }
     var editOpen by remember { mutableStateOf(false) }
     var moveDialog by remember { mutableStateOf(false) }
+    var showSelectionInfo by remember { mutableStateOf(false) }
     var newAlbum by remember { mutableStateOf(false) }
     var renameTarget by remember { mutableStateOf<EditTarget?>(null) }
     var dateTarget by remember { mutableStateOf<EditTarget?>(null) }
+    var deleteConfirmItem by remember { mutableStateOf<MediaItem?>(null) }
+    var deleteConfirmSelection by remember { mutableStateOf<DeleteSelectionTarget?>(null) }
 
     val tab = state.tab
     val openAlbum = state.albumId?.let { id -> state.index.albums.firstOrNull { it.id == id } }
@@ -166,7 +197,7 @@ fun GalleryApp(
         albumOpen -> openAlbum.name
         tab == GalleryTab.PHOTOS -> state.filter.title
         tab == GalleryTab.ALBUMS -> "Albums"
-        tab == GalleryTab.PRIVATE -> "Private"
+        tab == GalleryTab.PRIVATE -> if (state.inPrivateBin) "Private Bin" else "Private"
         tab == GalleryTab.BIN -> "Bin"
         else -> "Settings"
     }
@@ -176,6 +207,7 @@ fun GalleryApp(
         tab == GalleryTab.ALBUMS -> plural(state.index.albums.size, "album")
         tab == GalleryTab.PRIVATE -> when {
             !state.privateAvailable -> "Not set up yet"
+            state.inPrivateBin -> "${state.privateBinnedItems.size} items • 30 days retention"
             state.privateUnlocked -> plural(state.privateItems.size, "item")
             else -> "Protected by the device authentication"
         }
@@ -185,7 +217,7 @@ fun GalleryApp(
     val selectableIds = when {
         albumOpen -> state.albumItems.map { it.id }
         tab == GalleryTab.PHOTOS -> state.roll.map { it.id }
-        tab == GalleryTab.PRIVATE -> state.privateItems.map { it.id }
+        tab == GalleryTab.PRIVATE -> if (state.inPrivateBin) state.privateBinnedItems.map { it.id } else state.privateItems.map { it.id }
         tab == GalleryTab.BIN -> state.binnedItems.map { it.id }
         else -> emptyList()
     }
@@ -198,9 +230,17 @@ fun GalleryApp(
             tab != GalleryTab.PHOTOS ||
             state.albumId != null ||
             state.selecting ||
-            state.searchOpen,
+            state.searchOpen ||
+            (tab == GalleryTab.PRIVATE && state.inPrivateBin),
     ) {
-        viewModel.goHome()
+        when {
+            state.viewerItem != null -> viewModel.closeViewer()
+            state.selecting -> viewModel.clearSelection()
+            state.searchOpen -> viewModel.toggleSearch()
+            tab == GalleryTab.PRIVATE && state.inPrivateBin -> viewModel.closePrivateBin()
+            state.albumId != null -> viewModel.closeAlbum()
+            else -> viewModel.goHome()
+        }
     }
 
     Box(Modifier.fillMaxSize()) {
@@ -219,39 +259,30 @@ fun GalleryApp(
                     title = title,
                     subtitle = subtitle,
                     selection = state.selection,
+                    selectableCount = selectableIds.size,
                     onClearSelection = viewModel::clearSelection,
                     onSelectAll = if (selectableIds.isNotEmpty()) {
                         { viewModel.selectAll(selectableIds) }
                     } else {
                         null
                     },
-                    onFavorite = if (editable && tab != GalleryTab.PRIVATE) {
-                        viewModel::toggleSelectionFavorite
-                    } else {
-                        null
-                    },
-                    selectionAllFavorite = state.selectionAllFavorite,
-                    onEdit = if (editable) {
-                        { editOpen = true }
-                    } else {
-                        null
-                    },
-                    onRestore = if (tab == GalleryTab.BIN) viewModel::restoreSelection else null,
-                    onDelete = when (tab) {
-                        GalleryTab.PHOTOS -> ({ viewModel.moveSelectionToBin() })
-                        GalleryTab.BIN -> ({ viewModel.deleteSelectionForever() })
-                        else -> null
-                    },
                     searchOpen = state.searchOpen,
                     onToggleSearch = if (tab == GalleryTab.SETTINGS) null else viewModel::toggleSearch,
                     query = state.query,
                     onQuery = viewModel::setQuery,
-                    onBack = if (tab != GalleryTab.PHOTOS || state.albumId != null) {
-                        { viewModel.goHome() }
+                    onBack = if (tab != GalleryTab.PHOTOS || state.albumId != null || (tab == GalleryTab.PRIVATE && state.inPrivateBin)) {
+                        if (tab == GalleryTab.PRIVATE && state.inPrivateBin) {
+                            { viewModel.closePrivateBin() }
+                        } else if (state.albumId != null) {
+                            { viewModel.closeAlbum() }
+                        } else {
+                            { viewModel.goHome() }
+                        }
                     } else {
                         null
                     },
                     onMore = { optionsOpen = true },
+                    onHeaderLongClick = if (tab == GalleryTab.PHOTOS) onUnlockPrivate else null,
                 )
 
                 when (tab) {
@@ -264,15 +295,48 @@ fun GalleryApp(
             }
         }
 
-        FloatingNavBar(
-            current = tab,
-            onSelect = viewModel::selectTab,
-            onMenu = { menuOpen = true },
+        AnimatedVisibility(
+            visible = !state.selecting,
             modifier = Modifier.align(Alignment.BottomCenter),
-        )
+            enter = fadeIn() + slideInVertically { it },
+            exit = fadeOut() + slideOutVertically { it },
+        ) {
+            FloatingNavBar(
+                current = tab,
+                onSelect = viewModel::selectTab,
+                onMenu = { menuOpen = true },
+            )
+        }
 
         AnimatedVisibility(
-            visible = tab.isNavDestination && !state.selecting,
+            visible = state.selecting,
+            modifier = Modifier.align(Alignment.BottomCenter),
+            enter = fadeIn() + slideInVertically { it },
+            exit = fadeOut() + slideOutVertically { it },
+        ) {
+            SelectionBottomBar(
+                tab = tab,
+                inPrivateBin = (tab == GalleryTab.PRIVATE && state.inPrivateBin),
+                selectionCount = state.selection.size,
+                selectionAllFavorite = state.selectionAllFavorite,
+                onFavorite = if (tab != GalleryTab.PRIVATE) viewModel::toggleSelectionFavorite else null,
+                onDelete = {
+                    deleteConfirmSelection = DeleteSelectionTarget(
+                        ids = state.selection.toList(),
+                        isPermanent = (tab == GalleryTab.BIN || (tab == GalleryTab.PRIVATE && state.inPrivateBin)),
+                    )
+                },
+                onRestore = if (tab == GalleryTab.BIN) {
+                    viewModel::restoreSelection
+                } else if (tab == GalleryTab.PRIVATE && state.inPrivateBin) {
+                    viewModel::restorePrivateSelection
+                } else null,
+                onMore = { editOpen = true },
+            )
+        }
+
+        AnimatedVisibility(
+            visible = (tab.isNavDestination || (tab == GalleryTab.PRIVATE && state.privateUnlocked)) && !state.selecting,
             modifier = Modifier
                 .align(Alignment.BottomEnd)
                 .navigationBarsPadding()
@@ -280,7 +344,7 @@ fun GalleryApp(
             enter = fadeIn() + scaleIn(initialScale = 0.85f),
             exit = fadeOut() + scaleOut(targetScale = 0.85f),
         ) {
-            ImportButton(onClick = onImport)
+            ImportButton(onClick = if (tab == GalleryTab.PRIVATE) onImportPrivate else onImport)
         }
 
         // The viewer covers everything, including the floating bar.
@@ -297,40 +361,65 @@ fun GalleryApp(
                     onClose = viewModel::closeSplitView,
                 )
             } else {
+                val viewerList = when (tab) {
+                    GalleryTab.PHOTOS -> state.roll
+                    GalleryTab.ALBUMS -> state.albumItems
+                    GalleryTab.PRIVATE -> state.privateItems
+                    GalleryTab.BIN -> state.binnedItems
+                    else -> listOf(item)
+                }.ifEmpty { listOf(item) }
+
                 ViewerScreen(
-                    item = item,
+                    initialItem = item,
+                    items = viewerList,
                     isPrivate = item.isPrivate,
                     repository = viewModel.repository,
                     onClose = viewModel::closeViewer,
                     onOpenWith = onOpenWith,
                     onOpenInSplit = viewModel::openSplitView,
-                    onDelete = {
-                        viewModel.binItem(item)
-                        viewModel.closeViewer()
+                    onDelete = { target ->
+                        deleteConfirmItem = target
                     },
-                    onReencrypt = { viewModel.reencrypt(item) },
-                    onRename = {
+                    onRestore = if (item.isDeleted) {
+                        { target ->
+                            if (target.isPrivate) {
+                                viewModel.repository.restorePrivateFromBin(listOf(target.id))
+                            } else {
+                                viewModel.repository.restoreFromBin(listOf(target.id))
+                            }
+                            viewModel.closeViewer()
+                            viewModel.refresh()
+                        }
+                    } else null,
+                    onMoveToPrivate = if (!item.isPrivate && !item.isDeleted) {
+                        { target -> viewModel.moveItemToPrivate(target) }
+                    } else null,
+                    onSetAsCover = if (state.albumId != null && !item.isDeleted) {
+                        { target -> viewModel.setAlbumCover(state.albumId!!, target.id) }
+                    } else null,
+                    onReencrypt = { target -> viewModel.reencrypt(target) },
+                    onRename = { target ->
                         renameTarget = EditTarget(
-                            ids = listOf(item.id),
-                            initialName = item.name,
-                            initialDate = item.takenAt,
-                            isPrivate = item.isPrivate,
+                            ids = listOf(target.id),
+                            initialName = target.name,
+                            initialDate = target.takenAt,
+                            isPrivate = target.isPrivate,
                             selectionMode = false,
-                            item = item,
+                            item = target,
                         )
                     },
-                    onEditDate = {
+                    onEditDate = { target ->
                         dateTarget = EditTarget(
-                            ids = listOf(item.id),
-                            initialName = item.name,
-                            initialDate = item.takenAt,
-                            isPrivate = item.isPrivate,
+                            ids = listOf(target.id),
+                            initialName = target.name,
+                            initialDate = target.takenAt,
+                            isPrivate = target.isPrivate,
                             selectionMode = false,
-                            item = item,
+                            item = target,
                         )
                     },
-                    onToggleFavorite = {
-                        viewModel.setItemFavorite(item, !item.isFavorite)
+                    onToggleFavorite = { target ->
+                        viewModel.setItemFavorite(target, !target.isFavorite)
                     },
                 )
             }
@@ -365,7 +454,13 @@ fun GalleryApp(
         SelectionEditSheet(
             count = state.selection.size,
             canMove = tab != GalleryTab.PRIVATE,
+            isPrivate = tab == GalleryTab.PRIVATE,
+            canSetCover = albumOpen && state.selection.size == 1,
             onDismiss = { editOpen = false },
+            onShowInfo = {
+                editOpen = false
+                showSelectionInfo = true
+            },
             onRename = {
                 editOpen = false
                 val first = state.index.find(state.selection.firstOrNull().orEmpty()) ?: state.privateIndex.find(state.selection.firstOrNull().orEmpty())
@@ -392,12 +487,42 @@ fun GalleryApp(
                 editOpen = false
                 moveDialog = true
             },
+            onMoveToPrivate = {
+                editOpen = false
+                viewModel.moveSelectionToPrivate()
+            },
+            onMoveOutOfPrivate = {
+                editOpen = false
+                viewModel.moveSelectionOutOfPrivate()
+            },
+            onSetAsCover = {
+                editOpen = false
+                val coverId = state.selection.firstOrNull()
+                if (state.albumId != null && coverId != null) {
+                    viewModel.setAlbumCover(state.albumId!!, coverId)
+                }
+            },
         )
     }
+    if (showSelectionInfo) {
+        val selectedItems = remember(state.selection) {
+            state.selection.mapNotNull { id ->
+                state.index.find(id) ?: state.privateIndex.find(id)
+                    ?: state.binnedItems.find { it.id == id }
+                    ?: state.privateBinnedItems.find { it.id == id }
+            }
+        }
+        MediaInfoDialog(
+            items = selectedItems,
+            repository = viewModel.repository,
+            onDismiss = { showSelectionInfo = false },
+        )
+    }
+
     if (moveDialog) {
         AlbumPickerDialog(
             title = "Move to album",
-            albums = state.index.albums,
+            albums = state.index.albums.filter { it.id != VaultIndex.ALBUM_RECENTS },
             onDismiss = { moveDialog = false },
             onPick = {
                 viewModel.moveSelectionToAlbum(it)
@@ -450,6 +575,129 @@ fun GalleryApp(
             },
         )
     }
+
+    deleteConfirmItem?.let { target ->
+        AlertDialog(
+            onDismissRequest = { deleteConfirmItem = null },
+            icon = {
+                Icon(
+                    imageVector = ZarcIcons.Delete,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.error,
+                )
+            },
+            title = {
+                Text(if (target.isDeleted) "Delete permanently?" else "Move to Recycle Bin?")
+            },
+            text = {
+                Text(
+                    if (target.isDeleted) {
+                        "This item will be permanently deleted from the vault. This cannot be undone."
+                    } else {
+                        "This item will stay in the Recycle Bin for 30 days before being permanently deleted."
+                    }
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val itemToDelete = target
+                        deleteConfirmItem = null
+                        if (itemToDelete.isDeleted) {
+                            if (itemToDelete.isPrivate) {
+                                viewModel.repository.deletePrivateForever(listOf(itemToDelete.id))
+                            } else {
+                                viewModel.repository.deleteForever(listOf(itemToDelete.id))
+                            }
+                            viewModel.refresh()
+                        } else {
+                            viewModel.binItem(itemToDelete)
+                        }
+                        viewModel.closeViewer()
+                    },
+                    colors = androidx.compose.material3.ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error,
+                        contentColor = MaterialTheme.colorScheme.onError,
+                    ),
+                ) {
+                    Text(if (target.isDeleted) "Delete forever" else "Move to Bin")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { deleteConfirmItem = null }) {
+                    Text("Cancel")
+                }
+            },
+        )
+    }
+
+    deleteConfirmSelection?.let { target ->
+        AlertDialog(
+            onDismissRequest = { deleteConfirmSelection = null },
+            icon = {
+                Icon(
+                    imageVector = ZarcIcons.Delete,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.error,
+                )
+            },
+            title = {
+                Text(
+                    if (target.isPermanent) {
+                        if (target.ids.size == 1) "Delete permanently?" else "Delete ${target.ids.size} items permanently?"
+                    } else {
+                        if (target.ids.size == 1) "Move to Recycle Bin?" else "Move ${target.ids.size} items to Recycle Bin?"
+                    }
+                )
+            },
+            text = {
+                Text(
+                    if (target.isPermanent) {
+                        "Selected items will be permanently erased from your encrypted storage. This cannot be undone."
+                    } else {
+                        "Selected items will stay in the Recycle Bin for 30 days before being permanently deleted."
+                    }
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val isPerm = target.isPermanent
+                        deleteConfirmSelection = null
+                        if (isPerm) {
+                            if (tab == GalleryTab.PRIVATE) {
+                                viewModel.deletePrivateSelectionForever()
+                            } else {
+                                viewModel.deleteSelectionForever()
+                            }
+                        } else {
+                            if (tab == GalleryTab.PRIVATE) {
+                                viewModel.movePrivateSelectionToBin()
+                            } else {
+                                viewModel.moveSelectionToBin()
+                            }
+                        }
+                    },
+                    colors = androidx.compose.material3.ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error,
+                        contentColor = MaterialTheme.colorScheme.onError,
+                    ),
+                ) {
+                    Text(if (target.isPermanent) "Delete forever" else "Move to Bin")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { deleteConfirmSelection = null }) {
+                    Text("Cancel")
+                }
+            },
+        )
+    }
+
+    BeautifulLoader(
+        visible = state.busy,
+        message = state.busyMessage,
+    )
 }
 
 /** The action bar of a section; it turns into a selection bar when items are selected. */
@@ -458,66 +706,112 @@ private fun GalleryTopBar(
     title: String,
     subtitle: String?,
     selection: Set<String>,
+    selectableCount: Int = 0,
     onClearSelection: () -> Unit,
     onSelectAll: (() -> Unit)?,
-    onFavorite: (() -> Unit)?,
-    selectionAllFavorite: Boolean,
-    onEdit: (() -> Unit)?,
-    onRestore: (() -> Unit)?,
-    onDelete: (() -> Unit)?,
     searchOpen: Boolean,
     onToggleSearch: (() -> Unit)?,
     query: String,
     onQuery: (String) -> Unit,
     onBack: (() -> Unit)?,
     onMore: (() -> Unit)?,
+    onHeaderLongClick: (() -> Unit)? = null,
 ) {
     val selecting = selection.isNotEmpty()
+    val context = androidx.compose.ui.platform.LocalContext.current
     Column(
         Modifier
             .fillMaxWidth()
             .padding(
-                start = if (onBack != null && !selecting) 4.dp else 20.dp,
+                start = if (onBack != null && !selecting) 4.dp else 16.dp,
                 end = 8.dp,
                 top = 4.dp,
                 bottom = 2.dp,
             ),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            if (onBack != null && !selecting) {
-                IconButton(onClick = onBack) {
-                    Icon(ZarcIcons.Back, contentDescription = "Back to the roll")
+            if (selecting) {
+                val isAllSelected = selectableCount > 0 && selection.size >= selectableCount
+                Box(
+                    modifier = Modifier
+                        .size(26.dp)
+                        .clip(CircleShape)
+                        .background(
+                            if (isAllSelected) MaterialTheme.colorScheme.primary
+                            else Color.White.copy(alpha = 0.12f),
+                        )
+                        .border(
+                            width = if (isAllSelected) 0.dp else 1.5.dp,
+                            color = if (isAllSelected) Color.Transparent else Color.White.copy(alpha = 0.5f),
+                            shape = CircleShape,
+                        )
+                        .clickable {
+                            ZarcHaptics.click(context)
+                            if (isAllSelected) {
+                                onClearSelection()
+                            } else {
+                                onSelectAll?.invoke()
+                            }
+                        },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    if (isAllSelected) {
+                        Icon(
+                            imageVector = ZarcIcons.Check,
+                            contentDescription = "Deselect all",
+                            tint = MaterialTheme.colorScheme.onPrimary,
+                            modifier = Modifier.size(16.dp),
+                        )
+                    }
                 }
-            }
-            Column(Modifier.weight(1f)) {
+
+                Spacer(Modifier.width(14.dp))
+
                 Text(
-                    text = if (selecting) "${selection.size} selected" else title,
-                    style = MaterialTheme.typography.headlineSmall,
+                    text = "${selection.size} selected",
+                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
                 )
-                if (!selecting && subtitle != null) {
-                    Text(
-                        text = subtitle,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+
+                IconButton(onClick = onClearSelection) {
+                    Icon(ZarcIcons.Close, contentDescription = "Clear selection")
                 }
-            }
-            if (selecting) {
-                onSelectAll?.let { TopBarAction(ZarcIcons.SelectAll, "Select all", it) }
-                onFavorite?.let {
-                    TopBarAction(
-                        icon = if (selectionAllFavorite) ZarcIcons.Star else ZarcIcons.StarBorder,
-                        label = if (selectionAllFavorite) "Remove from favourites" else "Add to favourites",
-                        onClick = it,
-                    )
-                }
-                onEdit?.let { TopBarAction(ZarcIcons.Edit, "Edit", it) }
-                onRestore?.let { TopBarAction(ZarcIcons.Restore, "Restore", it) }
-                onDelete?.let { TopBarAction(ZarcIcons.Delete, "Delete", it) }
-                TopBarAction(ZarcIcons.Close, "Clear the selection", onClearSelection)
             } else {
+                if (onBack != null) {
+                    IconButton(onClick = onBack) {
+                        Icon(ZarcIcons.Back, contentDescription = "Back")
+                    }
+                }
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(8.dp))
+                        .combinedClickable(
+                            enabled = onHeaderLongClick != null,
+                            onClick = {},
+                            onLongClick = {
+                                ZarcHaptics.longPress(context)
+                                onHeaderLongClick?.invoke()
+                            },
+                        ),
+                ) {
+                    Text(
+                        text = title,
+                        style = MaterialTheme.typography.headlineSmall,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    if (subtitle != null) {
+                        Text(
+                            text = subtitle,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+
                 onToggleSearch?.let {
                     IconButton(onClick = it) {
                         Icon(
@@ -728,11 +1022,41 @@ fun PhotosScreen(state: GalleryUiState, viewModel: GalleryViewModel) {
                 else viewModel.openViewer(item)
             },
             onLongClick = { viewModel.toggleSelection(it.id) },
+            onSelectBatch = viewModel::selectBatch,
+            onDeselectBatch = viewModel::deselectBatch,
         )
     }
 }
 
-/** The grid of media items. */
+private sealed class GridEntry {
+    data class DateHeader(
+        val id: String,
+        val dateText: String,
+        val timestamp: Long,
+        val itemIds: List<String> = emptyList(),
+    ) : GridEntry()
+    data class Media(val item: MediaItem) : GridEntry()
+}
+
+private fun formatDateHeader(timestamp: Long): String {
+    if (timestamp <= 0L) return "Undated"
+    val cal = Calendar.getInstance()
+    val todayYear = cal.get(Calendar.YEAR)
+    val todayDay = cal.get(Calendar.DAY_OF_YEAR)
+
+    cal.timeInMillis = timestamp
+    val itemYear = cal.get(Calendar.YEAR)
+    val itemDay = cal.get(Calendar.DAY_OF_YEAR)
+
+    return when {
+        todayYear == itemYear && todayDay == itemDay -> "Today"
+        todayYear == itemYear && (todayDay - itemDay) == 1 -> "Yesterday"
+        todayYear == itemYear -> SimpleDateFormat("d MMMM", Locale.getDefault()).format(Date(timestamp))
+        else -> SimpleDateFormat("d MMMM yyyy", Locale.getDefault()).format(Date(timestamp))
+    }
+}
+
+/** The grid of media items with date headers and fast scrollbar. */
 @Composable
 fun MediaGrid(
     items: List<MediaItem>,
@@ -745,16 +1069,49 @@ fun MediaGrid(
     onLoadMore: () -> Unit,
     onClick: (MediaItem) -> Unit,
     onLongClick: (MediaItem) -> Unit,
+    onSelectBatch: ((List<String>) -> Unit)? = null,
+    onDeselectBatch: ((List<String>) -> Unit)? = null,
 ) {
     val gridState = rememberLazyGridState()
     val currentColumns by rememberUpdatedState(columns)
     var pinchZoom by remember { mutableFloatStateOf(1f) }
+    val scope = rememberCoroutineScope()
+    val context = androidx.compose.ui.platform.LocalContext.current
 
-    LaunchedEffect(gridState, items.size, hasMore) {
+    val entries = remember(items) {
+        val list = ArrayList<GridEntry>(items.size + (items.size / 4) + 10)
+        var lastDateText = ""
+        var headerSeq = 0
+        var currentBatch = mutableListOf<String>()
+        var lastHeaderIndex = -1
+
+        for (item in items) {
+            val dateText = formatDateHeader(item.takenAt)
+            if (dateText != lastDateText) {
+                if (lastHeaderIndex >= 0) {
+                    val prevHeader = list[lastHeaderIndex] as GridEntry.DateHeader
+                    list[lastHeaderIndex] = prevHeader.copy(itemIds = currentBatch.toList())
+                }
+                currentBatch = mutableListOf()
+                lastDateText = dateText
+                lastHeaderIndex = list.size
+                list.add(GridEntry.DateHeader("header_${headerSeq++}_$dateText", dateText, item.takenAt))
+            }
+            currentBatch.add(item.id)
+            list.add(GridEntry.Media(item))
+        }
+        if (lastHeaderIndex >= 0) {
+            val prevHeader = list[lastHeaderIndex] as GridEntry.DateHeader
+            list[lastHeaderIndex] = prevHeader.copy(itemIds = currentBatch.toList())
+        }
+        list
+    }
+
+    LaunchedEffect(gridState, entries.size, hasMore) {
         snapshotFlow { gridState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1 }
             .distinctUntilChanged()
             .collect { last ->
-                if (hasMore && last >= items.size - 9) onLoadMore()
+                if (hasMore && last >= entries.size - 12) onLoadMore()
             }
     }
     LaunchedEffect(columns) {
@@ -776,102 +1133,348 @@ fun MediaGrid(
         }
     }
 
-    LazyVerticalGrid(
-        columns = GridCells.Fixed(columns),
-        state = gridState,
+    var isDraggingBar by remember { mutableStateOf(false) }
+    var dragProgress by remember { mutableFloatStateOf(0f) }
+
+    BoxWithConstraints(
         modifier = Modifier
             .fillMaxSize()
             .transformable(transform),
-        contentPadding = PaddingValues(start = 2.dp, end = 2.dp, bottom = FloatingBarRoom),
-        horizontalArrangement = Arrangement.spacedBy(2.dp),
-        verticalArrangement = Arrangement.spacedBy(2.dp),
     ) {
-        items(items, key = { it.id }) { item ->
-            val selected = item.id in selection
-            val selectedAlpha by animateFloatAsState(
-                targetValue = if (selected) 1f else 0f,
-                label = "selection",
-            )
-            Box(
-                modifier = Modifier
-                    .animateItem()
-                    .aspectRatio(1f)
-                    .clip(CellShape)
-                    .combinedClickable(
-                        onClick = { onClick(item) },
-                        onLongClick = { onLongClick(item) },
-                    ),
-            ) {
-                MediaThumbnail(
-                    repository = repository,
-                    item = item,
-                    isPrivate = isPrivate,
-                    contentDescription = item.name,
-                    modifier = Modifier.fillMaxSize(),
-                )
-                if (item.isVideo) {
-                    Row(
-                        modifier = Modifier
-                            .align(Alignment.BottomEnd)
-                            .padding(5.dp)
-                            .clip(RoundedCornerShape(8.dp))
-                            .background(Color.Black.copy(alpha = 0.55f))
-                            .padding(horizontal = 5.dp, vertical = 2.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Icon(
-                            imageVector = ZarcIcons.Play,
-                            contentDescription = null,
-                            tint = Color.White,
-                            modifier = Modifier.size(11.dp),
-                        )
-                        if (item.durationMs > 0) {
-                            Spacer(Modifier.width(2.dp))
+        val containerHeightPx = constraints.maxHeight.toFloat()
+
+        LazyVerticalGrid(
+            columns = GridCells.Fixed(columns),
+            state = gridState,
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(start = 2.dp, end = 2.dp, bottom = FloatingBarRoom),
+            horizontalArrangement = Arrangement.spacedBy(2.dp),
+            verticalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+            items(
+                items = entries,
+                key = { entry ->
+                    when (entry) {
+                        is GridEntry.DateHeader -> entry.id
+                        is GridEntry.Media -> entry.item.id
+                    }
+                },
+                span = { entry ->
+                    when (entry) {
+                        is GridEntry.DateHeader -> GridItemSpan(maxLineSpan)
+                        is GridEntry.Media -> GridItemSpan(1)
+                    }
+                },
+                contentType = { entry ->
+                    when (entry) {
+                        is GridEntry.DateHeader -> "date_header"
+                        is GridEntry.Media -> "media_item"
+                    }
+                },
+            ) { entry ->
+                when (entry) {
+                    is GridEntry.DateHeader -> {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(start = 12.dp, top = 16.dp, bottom = 6.dp, end = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
                             Text(
-                                text = formatDuration(item.durationMs),
-                                style = MaterialTheme.typography.labelSmall,
-                                color = Color.White,
+                                text = entry.dateText,
+                                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                                color = MaterialTheme.colorScheme.onSurface,
+                                modifier = Modifier.weight(1f),
                             )
+                            if (selection.isNotEmpty()) {
+                                val allDateSelected = entry.itemIds.isNotEmpty() && entry.itemIds.all { it in selection }
+                                Box(
+                                    modifier = Modifier
+                                        .size(24.dp)
+                                        .clip(CircleShape)
+                                        .background(
+                                            if (allDateSelected) MaterialTheme.colorScheme.primary
+                                            else Color.White.copy(alpha = 0.12f),
+                                        )
+                                        .border(
+                                            width = if (allDateSelected) 0.dp else 1.5.dp,
+                                            color = if (allDateSelected) Color.Transparent else Color.White.copy(alpha = 0.5f),
+                                            shape = CircleShape,
+                                        )
+                                        .clickable {
+                                            ZarcHaptics.click(context)
+                                            if (allDateSelected) {
+                                                onDeselectBatch?.invoke(entry.itemIds)
+                                            } else {
+                                                onSelectBatch?.invoke(entry.itemIds)
+                                            }
+                                        },
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    if (allDateSelected) {
+                                        Icon(
+                                            imageVector = ZarcIcons.Check,
+                                            contentDescription = "Deselect date group",
+                                            tint = MaterialTheme.colorScheme.onPrimary,
+                                            modifier = Modifier.size(15.dp),
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    is GridEntry.Media -> {
+                        val item = entry.item
+                        val selected = item.id in selection
+                        val daysLeftBadge = if (item.isDeleted && item.deletedAt > 0L) {
+                            val now = System.currentTimeMillis()
+                            val daysPassed = ((now - item.deletedAt) / (24L * 60 * 60 * 1000L)).toInt()
+                            val daysLeft = maxOf(0, 30 - daysPassed)
+                            "${daysLeft}d left"
+                        } else null
+
+                        Box(
+                            modifier = Modifier
+                                .aspectRatio(1f)
+                                .clip(CellShape)
+                                .combinedClickable(
+                                    onClick = {
+                                        if (selection.isNotEmpty()) {
+                                            ZarcHaptics.click(context)
+                                        }
+                                        onClick(item)
+                                    },
+                                    onLongClick = {
+                                        ZarcHaptics.longPress(context)
+                                        onLongClick(item)
+                                    },
+                                ),
+                        ) {
+                            MediaThumbnail(
+                                repository = repository,
+                                item = item,
+                                isPrivate = isPrivate,
+                                contentDescription = item.name,
+                                daysLeftBadge = daysLeftBadge,
+                                modifier = Modifier.fillMaxSize(),
+                            )
+                            if (item.isVideo) {
+                                Row(
+                                    modifier = Modifier
+                                        .align(Alignment.BottomEnd)
+                                        .padding(5.dp)
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(Color.Black.copy(alpha = 0.55f))
+                                        .padding(horizontal = 5.dp, vertical = 2.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Icon(
+                                        imageVector = ZarcIcons.Play,
+                                        contentDescription = null,
+                                        tint = Color.White,
+                                        modifier = Modifier.size(11.dp),
+                                    )
+                                    if (item.durationMs > 0) {
+                                        Spacer(Modifier.width(2.dp))
+                                        Text(
+                                            text = formatDuration(item.durationMs),
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = Color.White,
+                                        )
+                                    }
+                                }
+                            }
+                            if (selected) {
+                                Box(
+                                    Modifier
+                                        .fillMaxSize()
+                                        .background(
+                                            MaterialTheme.colorScheme.primary.copy(alpha = 0.32f),
+                                        ),
+                                )
+                                Box(
+                                    modifier = Modifier
+                                        .align(Alignment.TopEnd)
+                                        .padding(6.dp)
+                                        .size(22.dp)
+                                        .clip(CircleShape)
+                                        .background(MaterialTheme.colorScheme.primary),
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    Icon(
+                                        imageVector = ZarcIcons.Check,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.onPrimary,
+                                        modifier = Modifier.size(15.dp),
+                                    )
+                                }
+                            }
                         }
                     }
                 }
-                Box(
-                    Modifier
-                        .fillMaxSize()
-                        .background(
-                            MaterialTheme.colorScheme.primary.copy(alpha = 0.32f * selectedAlpha),
-                        ),
+            }
+        }
+
+        // Floating sticky date header with smooth lingering delay (Samsung Gallery style)
+        val isScrolling = gridState.isScrollInProgress || isDraggingBar
+        var showStickyDate by remember { mutableStateOf(false) }
+        LaunchedEffect(gridState.isScrollInProgress, isDraggingBar) {
+            if (gridState.isScrollInProgress || isDraggingBar) {
+                showStickyDate = true
+            } else if (showStickyDate) {
+                delay(1400L)
+                showStickyDate = false
+            }
+        }
+
+        val topEntry = entries.getOrNull(gridState.firstVisibleItemIndex)
+        val currentVisibleDate = when (topEntry) {
+            is GridEntry.DateHeader -> topEntry.dateText
+            is GridEntry.Media -> formatDateHeader(topEntry.item.takenAt)
+            null -> ""
+        }
+        AnimatedVisibility(
+            visible = showStickyDate && currentVisibleDate.isNotEmpty(),
+            enter = fadeIn(animationSpec = tween(150)) + slideInVertically(animationSpec = tween(150)) { -it },
+            exit = fadeOut(animationSpec = tween(400)) + slideOutVertically(animationSpec = tween(400)) { -it },
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .padding(top = 10.dp),
+        ) {
+            Surface(
+                shape = RoundedCornerShape(16.dp),
+                color = MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.94f),
+                shadowElevation = 8.dp,
+                border = BorderStroke(0.5.dp, Color.White.copy(alpha = 0.12f)),
+            ) {
+                Text(
+                    text = currentVisibleDate,
+                    style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
+                    color = MaterialTheme.colorScheme.onSurface,
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
                 )
+            }
+        }
+
+        // Fast Scrollbar
+        if (entries.size > 15) {
+            val totalItems = entries.size
+            val topInset = 8.dp
+            val bottomInset = FloatingBarRoom + 8.dp
+            val thumbHeightDp = 48.dp
+
+            val scrollFraction by remember(totalItems) {
+                derivedStateOf {
+                    if (!gridState.canScrollForward && gridState.canScrollBackward) {
+                        1f
+                    } else if (!gridState.canScrollBackward) {
+                        0f
+                    } else {
+                        val firstIndex = gridState.firstVisibleItemIndex
+                        (firstIndex.toFloat() / (totalItems - 1).coerceAtLeast(1).toFloat()).coerceIn(0f, 1f)
+                    }
+                }
+            }
+
+            val currentFraction = if (isDraggingBar) dragProgress else scrollFraction
+            val usableHeightDp = (maxHeight - topInset - bottomInset - thumbHeightDp).coerceAtLeast(0.dp)
+            val thumbOffsetDp = topInset + usableHeightDp * currentFraction
+
+            // Active date label: during drag, based on target; during normal scroll, based on top visible item
+            val activeItemIndex = if (isDraggingBar) {
+                (dragProgress * (totalItems - 1)).toInt().coerceIn(0, totalItems - 1)
+            } else {
+                gridState.firstVisibleItemIndex.coerceIn(0, totalItems - 1)
+            }
+
+            val activeDateLabel = remember(activeItemIndex, entries) {
+                val entry = entries.getOrNull(activeItemIndex)
+                when (entry) {
+                    is GridEntry.DateHeader -> entry.dateText
+                    is GridEntry.Media -> formatDateHeader(entry.item.takenAt)
+                    null -> ""
+                }
+            }
+
+            // Floating date pill
+            if (isDraggingBar && activeDateLabel.isNotEmpty()) {
+                Surface(
+                    shape = RoundedCornerShape(16.dp),
+                    color = MaterialTheme.colorScheme.inverseSurface,
+                    shadowElevation = 8.dp,
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .offset(x = (-46).dp, y = (thumbOffsetDp + 6.dp).coerceAtLeast(topInset)),
+                ) {
+                    Text(
+                        text = activeDateLabel,
+                        color = MaterialTheme.colorScheme.inverseOnSurface,
+                        style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
+                    )
+                }
+            }
+
+            // Scrollbar Track & Thumb
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(top = topInset, bottom = bottomInset)
+                    .fillMaxHeight()
+                    .width(36.dp)
+                    .pointerInput(totalItems) {
+                        val thumbHeightPx = 48.dp.toPx()
+                        detectVerticalDragGestures(
+                            onDragStart = { offset ->
+                                isDraggingBar = true
+                                val usablePx = (size.height - thumbHeightPx).coerceAtLeast(1f)
+                                val fraction = ((offset.y - thumbHeightPx / 2f) / usablePx).coerceIn(0f, 1f)
+                                dragProgress = fraction
+                                val target = (fraction * (totalItems - 1)).toInt().coerceIn(0, totalItems - 1)
+                                ZarcHaptics.click(context)
+                                scope.launch { gridState.scrollToItem(target) }
+                            },
+                            onDragEnd = { isDraggingBar = false },
+                            onDragCancel = { isDraggingBar = false },
+                            onVerticalDrag = { change, _ ->
+                                change.consume()
+                                val usablePx = (size.height - thumbHeightPx).coerceAtLeast(1f)
+                                val fraction = ((change.position.y - thumbHeightPx / 2f) / usablePx).coerceIn(0f, 1f)
+                                dragProgress = fraction
+                                val target = (fraction * (totalItems - 1)).toInt().coerceIn(0, totalItems - 1)
+                                scope.launch { gridState.scrollToItem(target) }
+                            },
+                        )
+                    },
+            ) {
+                val thumbOffsetInsideTrack = usableHeightDp * currentFraction
                 Box(
                     modifier = Modifier
                         .align(Alignment.TopEnd)
-                        .padding(6.dp)
-                        .size(22.dp)
-                        .graphicsLayer {
-                            alpha = selectedAlpha
-                            scaleX = 0.75f + 0.25f * selectedAlpha
-                            scaleY = 0.75f + 0.25f * selectedAlpha
-                        }
-                        .clip(CircleShape)
-                        .background(MaterialTheme.colorScheme.primary),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Icon(
-                        imageVector = ZarcIcons.Check,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.onPrimary,
-                        modifier = Modifier.size(15.dp),
-                    )
-                }
+                        .offset(y = thumbOffsetInsideTrack)
+                        .padding(end = 4.dp)
+                        .width(if (isDraggingBar) 7.dp else 4.dp)
+                        .height(thumbHeightDp)
+                        .clip(RoundedCornerShape(4.dp))
+                        .background(
+                            if (isDraggingBar) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f),
+                        ),
+                )
             }
         }
     }
 }
 
 /** The albums. */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AlbumsScreen(state: GalleryUiState, viewModel: GalleryViewModel) {
     var renaming by remember { mutableStateOf<Album?>(null) }
+    var actionAlbum by remember { mutableStateOf<Album?>(null) }
+    var chooseCoverAlbum by remember { mutableStateOf<Album?>(null) }
+    var deleteConfirmAlbum by remember { mutableStateOf<Album?>(null) }
     val openAlbum = state.albumId?.let { id -> state.index.albums.firstOrNull { it.id == id } }
 
     if (openAlbum != null) {
@@ -899,6 +1502,8 @@ fun AlbumsScreen(state: GalleryUiState, viewModel: GalleryViewModel) {
                     else viewModel.openViewer(item)
                 },
                 onLongClick = { viewModel.toggleSelection(it.id) },
+                onSelectBatch = viewModel::selectBatch,
+                onDeselectBatch = viewModel::deselectBatch,
             )
         }
         return
@@ -919,6 +1524,7 @@ fun AlbumsScreen(state: GalleryUiState, viewModel: GalleryViewModel) {
             },
         )
     } else {
+        val context = androidx.compose.ui.platform.LocalContext.current
         LazyVerticalGrid(
             columns = GridCells.Fixed(2),
             modifier = Modifier.fillMaxSize(),
@@ -928,17 +1534,146 @@ fun AlbumsScreen(state: GalleryUiState, viewModel: GalleryViewModel) {
         ) {
             items(albums, key = { it.id }) { album ->
                 val members = state.index.inAlbum(album.id)
+                val coverItem = album.coverId?.let { cid -> state.index.find(cid) } ?: members.firstOrNull()
                 AlbumCard(
                     album = album,
                     count = members.size,
-                    cover = members.firstOrNull(),
+                    cover = coverItem,
                     repository = viewModel.repository,
                     onClick = { viewModel.openAlbum(album.id) },
-                    onLongClick = if (album.system) null else ({ renaming = album }),
-                    onRename = if (album.system) null else ({ renaming = album }),
+                    onLongClick = if (album.system) null else ({ actionAlbum = album }),
                 )
             }
         }
+    }
+
+    actionAlbum?.let { album ->
+        val members = state.index.inAlbum(album.id)
+        ModalBottomSheet(
+            onDismissRequest = { actionAlbum = null },
+            containerColor = MaterialTheme.colorScheme.surfaceContainer,
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 32.dp),
+            ) {
+                SheetHeader(album.name, plural(members.size, "item"))
+                SheetAction(
+                    icon = ZarcIcons.Edit,
+                    title = "Rename album",
+                    subtitle = "Change the name of this album",
+                    onClick = {
+                        val target = album
+                        actionAlbum = null
+                        renaming = target
+                    },
+                )
+                SheetAction(
+                    icon = ZarcIcons.Albums,
+                    title = "Change cover image",
+                    subtitle = "Choose a photo as album cover",
+                    onClick = {
+                        val target = album
+                        actionAlbum = null
+                        chooseCoverAlbum = target
+                    },
+                )
+                SheetAction(
+                    icon = ZarcIcons.Delete,
+                    title = "Delete album",
+                    subtitle = "Photos and videos inside will remain safe in your photos",
+                    destructive = true,
+                    onClick = {
+                        val target = album
+                        actionAlbum = null
+                        deleteConfirmAlbum = target
+                    },
+                )
+            }
+        }
+    }
+
+    chooseCoverAlbum?.let { album ->
+        val members = state.index.inAlbum(album.id)
+        ZarcSheet(onDismiss = { chooseCoverAlbum = null }) {
+            SheetHeader("Change cover image", album.name)
+            if (members.isEmpty()) {
+                Text(
+                    text = "This album contains no photos yet.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(16.dp),
+                )
+            } else {
+                LazyVerticalGrid(
+                    columns = GridCells.Fixed(3),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(340.dp),
+                    horizontalArrangement = Arrangement.spacedBy(3.dp),
+                    verticalArrangement = Arrangement.spacedBy(3.dp),
+                    contentPadding = PaddingValues(8.dp),
+                ) {
+                    items(members, key = { it.id }) { item ->
+                        Box(
+                            modifier = Modifier
+                                .aspectRatio(1f)
+                                .clip(RoundedCornerShape(8.dp))
+                                .clickable {
+                                    viewModel.setAlbumCover(album.id, item.id)
+                                    chooseCoverAlbum = null
+                                },
+                        ) {
+                            MediaThumbnail(
+                                repository = viewModel.repository,
+                                item = item,
+                                isPrivate = false,
+                                contentDescription = item.name,
+                                modifier = Modifier.fillMaxSize(),
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    deleteConfirmAlbum?.let { album ->
+        AlertDialog(
+            onDismissRequest = { deleteConfirmAlbum = null },
+            icon = {
+                Icon(
+                    imageVector = ZarcIcons.Delete,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.error,
+                )
+            },
+            title = { Text("Delete album?") },
+            text = {
+                Text("Delete \"${album.name}\"? Photos and videos inside this album will not be deleted and will remain in your photos.")
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val id = album.id
+                        deleteConfirmAlbum = null
+                        viewModel.deleteAlbum(id)
+                    },
+                    colors = androidx.compose.material3.ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error,
+                        contentColor = MaterialTheme.colorScheme.onError,
+                    ),
+                ) {
+                    Text("Delete")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { deleteConfirmAlbum = null }) {
+                    Text("Cancel")
+                }
+            },
+        )
     }
 
     renaming?.let { album ->
@@ -952,6 +1687,11 @@ fun AlbumsScreen(state: GalleryUiState, viewModel: GalleryViewModel) {
             },
         )
     }
+
+    BeautifulLoader(
+        visible = state.busy,
+        message = state.busyMessage,
+    )
 }
 
 /** One album card. */
@@ -963,14 +1703,22 @@ private fun AlbumCard(
     repository: GalleryRepository,
     onClick: () -> Unit,
     onLongClick: (() -> Unit)?,
-    onRename: (() -> Unit)?,
 ) {
+    val context = androidx.compose.ui.platform.LocalContext.current
     Card(
         modifier = Modifier
             .fillMaxWidth()
             .combinedClickable(
-                onClick = { onClick() },
-                onLongClick = onLongClick,
+                onClick = {
+                    ZarcHaptics.click(context)
+                    onClick()
+                },
+                onLongClick = if (onLongClick != null) {
+                    {
+                        ZarcHaptics.longPress(context)
+                        onLongClick()
+                    }
+                } else null,
             ),
         shape = RoundedCornerShape(16.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
@@ -992,16 +1740,16 @@ private fun AlbumCard(
                     )
                 } else {
                     Icon(
-                        imageVector = if (album.id == VaultIndex.ALBUM_FAVOURITES) {
-                            ZarcIcons.Star
-                        } else {
-                            ZarcIcons.Albums
+                        imageVector = when (album.id) {
+                            VaultIndex.ALBUM_FAVOURITES -> ZarcIcons.Star
+                            VaultIndex.ALBUM_RECENTS -> ZarcIcons.Roll
+                            else -> ZarcIcons.Albums
                         },
                         contentDescription = null,
-                        tint = if (album.id == VaultIndex.ALBUM_FAVOURITES) {
-                            ZarcPalette.favourite
-                        } else {
-                            MaterialTheme.colorScheme.onSurfaceVariant
+                        tint = when (album.id) {
+                            VaultIndex.ALBUM_FAVOURITES -> ZarcPalette.favourite
+                            VaultIndex.ALBUM_RECENTS -> MaterialTheme.colorScheme.primary
+                            else -> MaterialTheme.colorScheme.onSurfaceVariant
                         },
                         modifier = Modifier.align(Alignment.Center).size(32.dp),
                     )
@@ -1010,7 +1758,7 @@ private fun AlbumCard(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(start = 12.dp, end = 4.dp, top = 8.dp, bottom = 8.dp),
+                    .padding(horizontal = 12.dp, vertical = 10.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Column(Modifier.weight(1f)) {
@@ -1026,11 +1774,6 @@ private fun AlbumCard(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-                if (onRename != null) {
-                    IconButton(onClick = onRename) {
-                        Icon(ZarcIcons.MoreVert, contentDescription = "Rename the album")
-                    }
-                }
             }
         }
     }
@@ -1044,10 +1787,35 @@ fun PrivateScreen(
     onUnlock: () -> Unit,
 ) {
     when {
-        !state.privateAvailable -> EmptyState(
-            title = "No private area yet",
-            subtitle = "Set up the private area in the settings to protect it with the device authentication.",
-        )
+        !state.privateAvailable -> Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(32.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center,
+        ) {
+            Icon(
+                imageVector = ZarcIcons.Lock,
+                contentDescription = null,
+                tint = ZarcPalette.privateArea,
+                modifier = Modifier.size(56.dp),
+            )
+            Spacer(Modifier.height(16.dp))
+            Text("Private Vault", style = MaterialTheme.typography.titleLarge)
+            Spacer(Modifier.height(8.dp))
+            Text(
+                text = "Hidden, double-encrypted vault protected by hardware biometrics.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+            )
+            Spacer(Modifier.height(24.dp))
+            Button(onClick = { viewModel.enablePrivateArea() }) {
+                Icon(ZarcIcons.Shield, contentDescription = null)
+                Spacer(Modifier.width(8.dp))
+                Text("Set up Private Vault")
+            }
+        }
 
         !state.privateUnlocked -> Column(
             modifier = Modifier
@@ -1063,10 +1831,10 @@ fun PrivateScreen(
                 modifier = Modifier.size(56.dp),
             )
             Spacer(Modifier.height(16.dp))
-            Text("The private album is locked", style = MaterialTheme.typography.titleMedium)
+            Text("Private Vault is locked", style = MaterialTheme.typography.titleMedium)
             Spacer(Modifier.height(8.dp))
             Text(
-                text = "Authenticate with the device to open it.",
+                text = "Authenticate with biometrics to open.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -1074,30 +1842,60 @@ fun PrivateScreen(
             Button(onClick = onUnlock) {
                 Icon(ZarcIcons.Lock, contentDescription = null)
                 Spacer(Modifier.width(8.dp))
-                Text("Unlock")
+                Text("Unlock Private Vault")
             }
         }
 
-        state.privateItems.isEmpty() -> EmptyState(
-            "The private album is empty",
-            "Import into it from the private section.",
-        )
+        state.inPrivateBin -> Column(Modifier.fillMaxSize()) {
+            if (state.privateBinnedItems.isEmpty()) {
+                EmptyState("Private bin is empty", "Deleted private items stay here for 30 days before permanent deletion.")
+            } else {
+                MediaGrid(
+                    items = state.visiblePrivateBinnedItems,
+                    repository = viewModel.repository,
+                    isPrivate = true,
+                    selection = state.selection,
+                    columns = state.gridColumns,
+                    hasMore = state.hasMore,
+                    onColumnsChange = viewModel::setGridColumns,
+                    onLoadMore = viewModel::loadMore,
+                    onClick = { item ->
+                        if (state.selecting) viewModel.toggleSelection(item.id)
+                        else viewModel.openViewer(item)
+                    },
+                    onLongClick = { viewModel.toggleSelection(it.id) },
+                    onSelectBatch = viewModel::selectBatch,
+                    onDeselectBatch = viewModel::deselectBatch,
+                )
+            }
+        }
 
-        else -> MediaGrid(
-            items = state.visiblePrivateItems,
-            repository = viewModel.repository,
-            isPrivate = true,
-            selection = state.selection,
-            columns = state.gridColumns,
-            hasMore = state.hasMore,
-            onColumnsChange = viewModel::setGridColumns,
-            onLoadMore = viewModel::loadMore,
-            onClick = { item ->
-                if (state.selecting) viewModel.toggleSelection(item.id)
-                else viewModel.openViewer(item)
-            },
-            onLongClick = { viewModel.toggleSelection(it.id) },
-        )
+        state.privateItems.isEmpty() -> Column(Modifier.fillMaxSize()) {
+            EmptyState(
+                "Private Vault is empty",
+                "Tap the import button below to securely store confidential media.",
+            )
+        }
+
+        else -> Column(Modifier.fillMaxSize()) {
+            MediaGrid(
+                items = state.visiblePrivateItems,
+                repository = viewModel.repository,
+                isPrivate = true,
+                selection = state.selection,
+                columns = state.gridColumns,
+                hasMore = state.hasMore,
+                onColumnsChange = viewModel::setGridColumns,
+                onLoadMore = viewModel::loadMore,
+                onClick = { item ->
+                    if (state.selecting) viewModel.toggleSelection(item.id)
+                    else viewModel.openViewer(item)
+                },
+                onLongClick = { viewModel.toggleSelection(it.id) },
+                onSelectBatch = viewModel::selectBatch,
+                onDeselectBatch = viewModel::deselectBatch,
+            )
+        }
     }
 }
 
@@ -1105,7 +1903,7 @@ fun PrivateScreen(
 @Composable
 fun BinScreen(state: GalleryUiState, viewModel: GalleryViewModel) {
     if (state.binnedItems.isEmpty()) {
-        EmptyState("The bin is empty", "Deleted items stay here until you empty the bin.")
+        EmptyState("The bin is empty", "Deleted items stay here for 30 days before being permanently deleted.")
     } else {
         MediaGrid(
             items = state.visibleBinnedItems,
@@ -1116,8 +1914,13 @@ fun BinScreen(state: GalleryUiState, viewModel: GalleryViewModel) {
             hasMore = state.hasMore,
             onColumnsChange = viewModel::setGridColumns,
             onLoadMore = viewModel::loadMore,
-            onClick = { viewModel.toggleSelection(it.id) },
+            onClick = { item ->
+                if (state.selecting) viewModel.toggleSelection(item.id)
+                else viewModel.openViewer(item)
+            },
             onLongClick = { viewModel.toggleSelection(it.id) },
+            onSelectBatch = viewModel::selectBatch,
+            onDeselectBatch = viewModel::deselectBatch,
         )
     }
 }
@@ -1279,39 +2082,75 @@ private fun OptionsSheet(
             }
 
             GalleryTab.PRIVATE -> {
-                SheetHeader("Private", if (state.privateUnlocked) "Unlocked" else "Locked")
-                if (state.privateUnlocked) {
+                if (state.inPrivateBin) {
+                    SheetHeader("Private Recycle Bin", plural(state.privateBinnedItems.size, "item"))
+                    if (state.privateBinnedItems.isNotEmpty()) {
+                        SheetAction(
+                            icon = ZarcIcons.EmptyBin,
+                            title = "Empty private bin",
+                            subtitle = "Delete all private items forever",
+                            destructive = true,
+                            onClick = {
+                                viewModel.emptyPrivateBin()
+                                onDismiss()
+                            },
+                        )
+                    }
                     SheetAction(
-                        icon = ZarcIcons.Lock,
-                        title = "Lock the private album",
-                        subtitle = "Drop the key and hide the items again",
-                        tint = ZarcPalette.privateArea,
+                        icon = ZarcIcons.SelectAll,
+                        title = "Select all",
+                        subtitle = "Pick every visible item",
                         onClick = {
-                            viewModel.lockPrivateArea()
+                            viewModel.selectAll(state.privateBinnedItems.map { it.id })
                             onDismiss()
                         },
                     )
                 } else {
-                    SheetAction(
-                        icon = ZarcIcons.Lock,
-                        title = "Unlock the private album",
-                        subtitle = "Authenticate with the device",
-                        tint = ZarcPalette.privateArea,
-                        onClick = {
-                            onDismiss()
-                            onUnlockPrivate()
-                        },
-                    )
+                    SheetHeader("Private Vault", if (state.privateUnlocked) "Unlocked" else "Locked")
+                    if (state.privateUnlocked) {
+                        SheetAction(
+                            icon = ZarcIcons.Bin,
+                            title = "Recycle Bin",
+                            subtitle = if (state.privateBinnedItems.isEmpty()) "Empty" else "${state.privateBinnedItems.size} items",
+                            tint = ZarcPalette.bin,
+                            chevron = true,
+                            onClick = {
+                                viewModel.openPrivateBin()
+                                onDismiss()
+                            },
+                        )
+                        SheetAction(
+                            icon = ZarcIcons.Lock,
+                            title = "Lock Private Vault",
+                            subtitle = "Drop key and hide private items immediately",
+                            tint = ZarcPalette.privateArea,
+                            onClick = {
+                                viewModel.lockPrivateArea()
+                                onDismiss()
+                            },
+                        )
+                        SheetAction(
+                            icon = ZarcIcons.SelectAll,
+                            title = "Select all",
+                            subtitle = "Pick every visible item",
+                            onClick = {
+                                viewModel.selectAll(state.privateItems.map { it.id })
+                                onDismiss()
+                            },
+                        )
+                    } else {
+                        SheetAction(
+                            icon = ZarcIcons.Lock,
+                            title = "Unlock Private Vault",
+                            subtitle = "Authenticate with biometrics to unlock",
+                            tint = ZarcPalette.privateArea,
+                            onClick = {
+                                onDismiss()
+                                onUnlockPrivate()
+                            },
+                        )
+                    }
                 }
-                SheetAction(
-                    icon = ZarcIcons.SelectAll,
-                    title = "Select all",
-                    subtitle = "Pick every visible item",
-                    onClick = {
-                        viewModel.selectAll(state.privateItems.map { it.id })
-                        onDismiss()
-                    },
-                )
             }
 
             GalleryTab.BIN -> {
@@ -1381,19 +2220,7 @@ private fun MenuSheet(
     onImportSamples: () -> Unit,
 ) {
     ZarcSheet(onDismiss = onDismiss) {
-        SheetHeader("Menu", "Private, bin and the vault")
-        SheetAction(
-            icon = ZarcIcons.Lock,
-            title = "Private",
-            subtitle = when {
-                !state.privateAvailable -> "Not set up yet"
-                state.privateUnlocked -> "${plural(state.privateItems.size, "item")} unlocked"
-                else -> "Locked behind the device authentication"
-            },
-            tint = ZarcPalette.privateArea,
-            chevron = true,
-            onClick = { onNavigate(GalleryTab.PRIVATE) },
-        )
+        SheetHeader("Menu", "Bin, settings and tools")
         SheetAction(
             icon = ZarcIcons.Bin,
             title = "Bin",
@@ -1630,17 +2457,47 @@ fun AlbumPickerDialog(
 private fun SelectionEditSheet(
     count: Int,
     canMove: Boolean,
+    isPrivate: Boolean = false,
+    canSetCover: Boolean = false,
     onDismiss: () -> Unit,
     onRename: () -> Unit,
     onEditDate: () -> Unit,
     onMove: () -> Unit,
+    onShowInfo: () -> Unit,
+    onMoveToPrivate: (() -> Unit)? = null,
+    onMoveOutOfPrivate: (() -> Unit)? = null,
+    onSetAsCover: (() -> Unit)? = null,
 ) {
     ZarcSheet(onDismiss = onDismiss) {
-        SheetHeader("Edit", plural(count, "item"))
+        SheetHeader("More options", plural(count, "item selected"))
+        if (!isPrivate && onMoveToPrivate != null) {
+            SheetAction(
+                icon = ZarcIcons.Lock,
+                title = "Move to Private Vault",
+                subtitle = "Double-encrypt and hide selected items",
+                onClick = onMoveToPrivate,
+            )
+        }
+        if (isPrivate && onMoveOutOfPrivate != null) {
+            SheetAction(
+                icon = ZarcIcons.OpenWith,
+                title = "Move to Photos",
+                subtitle = "Move selected items back to public roll",
+                onClick = onMoveOutOfPrivate,
+            )
+        }
+        if (canMove) {
+            SheetAction(
+                icon = ZarcIcons.Move,
+                title = "Move to album",
+                subtitle = "Group the selected items into an album",
+                onClick = onMove,
+            )
+        }
         SheetAction(
             icon = ZarcIcons.Edit,
             title = "Rename",
-            subtitle = if (count == 1) "Change the display name" else "Number the selected names",
+            subtitle = if (count == 1) "Change the display name" else "Batch rename selected items",
             onClick = onRename,
         )
         SheetAction(
@@ -1649,14 +2506,157 @@ private fun SelectionEditSheet(
             subtitle = "Change when the media was captured",
             onClick = onEditDate,
         )
-        if (canMove) {
+        SheetAction(
+            icon = ZarcIcons.Info,
+            title = "Show info",
+            subtitle = "View details and resolution of selected media",
+            onClick = onShowInfo,
+        )
+        if (canSetCover && onSetAsCover != null) {
             SheetAction(
-                icon = ZarcIcons.Move,
-                title = "Move to album",
-                subtitle = "Group the selected items",
-                onClick = onMove,
+                icon = ZarcIcons.Albums,
+                title = "Set as album cover",
+                subtitle = "Use this photo as album thumbnail",
+                onClick = onSetAsCover,
             )
         }
+    }
+}
+
+@Composable
+private fun SelectionBottomBar(
+    tab: GalleryTab,
+    inPrivateBin: Boolean,
+    selectionCount: Int,
+    selectionAllFavorite: Boolean,
+    onFavorite: (() -> Unit)?,
+    onDelete: () -> Unit,
+    onRestore: (() -> Unit)?,
+    onMore: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Box(
+        modifier
+            .fillMaxWidth()
+            .navigationBarsPadding()
+            .padding(bottom = FloatingBarGap),
+        contentAlignment = Alignment.Center,
+    ) {
+        Surface(
+            color = Color(0xFF222226),
+            contentColor = Color.White,
+            shape = RoundedCornerShape(30.dp),
+            shadowElevation = 24.dp,
+            border = BorderStroke(1.dp, Color.White.copy(alpha = 0.12f)),
+        ) {
+            Row(
+                modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                if (tab == GalleryTab.BIN || inPrivateBin) {
+                    SelectionBottomItem(
+                        icon = ZarcIcons.Restore,
+                        label = "Restore",
+                        tint = Color.White,
+                        onClick = { onRestore?.invoke() },
+                    )
+                    SelectionBottomItem(
+                        icon = ZarcIcons.Delete,
+                        label = "Delete forever",
+                        tint = MaterialTheme.colorScheme.error,
+                        onClick = onDelete,
+                    )
+                    SelectionBottomItem(
+                        icon = ZarcIcons.More,
+                        label = "More",
+                        tint = Color.White,
+                        onClick = onMore,
+                    )
+                } else {
+                    if (tab != GalleryTab.PRIVATE && onFavorite != null) {
+                        SelectionBottomItem(
+                            icon = if (selectionAllFavorite) ZarcIcons.Star else ZarcIcons.StarBorder,
+                            label = "Favourite",
+                            tint = if (selectionAllFavorite) ZarcPalette.favourite else Color.White,
+                            onClick = onFavorite,
+                        )
+                    }
+                    SelectionBottomItem(
+                        icon = ZarcIcons.Delete,
+                        label = "Delete",
+                        tint = MaterialTheme.colorScheme.error,
+                        onClick = onDelete,
+                    )
+                    SelectionBottomItem(
+                        icon = ZarcIcons.More,
+                        label = "More",
+                        tint = Color.White,
+                        onClick = onMore,
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SelectionBottomItem(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    label: String,
+    tint: Color = Color.White,
+    onClick: () -> Unit,
+) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    Column(
+        modifier = Modifier
+            .widthIn(min = 72.dp)
+            .clip(RoundedCornerShape(16.dp))
+            .clickable {
+                ZarcHaptics.click(context)
+                onClick()
+            }
+            .padding(horizontal = 8.dp, vertical = 6.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = label,
+            tint = tint,
+            modifier = Modifier.size(24.dp),
+        )
+        Spacer(Modifier.height(4.dp))
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Medium, fontSize = 11.sp, lineHeight = 14.sp),
+            color = tint,
+            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+            maxLines = 2,
+        )
+    }
+}
+
+@Composable
+private fun InfoRow(label: String, value: String) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Text(
+            text = value,
+            style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Medium),
+            color = MaterialTheme.colorScheme.onSurface,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.padding(start = 12.dp),
+        )
     }
 }
 
@@ -1724,4 +2724,271 @@ fun DateTimeDialog(
             finished = true
         }
     }
+}
+
+/** A beautiful full-screen loader overlay for vault operations. */
+@Composable
+fun BeautifulLoader(visible: Boolean, message: String? = null) {
+    AnimatedVisibility(
+        visible = visible,
+        enter = fadeIn(),
+        exit = fadeOut(),
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color(0xCC000000))
+                .clickable(enabled = false) {},
+            contentAlignment = Alignment.Center,
+        ) {
+            Card(
+                shape = RoundedCornerShape(24.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh),
+                elevation = CardDefaults.cardElevation(defaultElevation = 12.dp),
+                modifier = Modifier
+                    .padding(32.dp)
+                    .widthIn(min = 220.dp, max = 320.dp),
+            ) {
+                Column(
+                    modifier = Modifier.padding(horizontal = 28.dp, vertical = 24.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center,
+                ) {
+                    androidx.compose.material3.CircularProgressIndicator(
+                        modifier = Modifier.size(46.dp),
+                        color = MaterialTheme.colorScheme.primary,
+                        strokeWidth = 4.dp,
+                    )
+                    Spacer(Modifier.height(18.dp))
+                    Text(
+                        text = "Zarc Vault",
+                        style = MaterialTheme.typography.titleMedium,
+                    )
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        text = message ?: "Processing...",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                    )
+                }
+            }
+        }
+    }
+}
+
+/** Detailed explanation of the stealth PIN calculation, shown in the Private screen and Private options. */
+@Composable
+fun StealthGuideDialog(onDismiss: () -> Unit) {
+    val now = Calendar.getInstance()
+    val min = now.get(Calendar.MINUTE)
+    val h24 = now.get(Calendar.HOUR_OF_DAY)
+    val mm = "%02d".format(min)
+    val h24Rev = "%02d".format(h24).reversed()
+    val samplePin = "$mm$h24Rev"
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = { Icon(ZarcIcons.Shield, contentDescription = null, tint = ZarcPalette.privateArea) },
+        title = { Text("Stealth Dynamic PIN") },
+        text = {
+            Column {
+                Text(
+                    text = "Double protection for Private Vault. When enabled, after biometrics succeed, you must enter a dynamically changing 4-digit PIN based on the current time:",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                Spacer(Modifier.height(12.dp))
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh),
+                ) {
+                    Column(Modifier.padding(12.dp)) {
+                        Text(
+                            text = "Formula: MM + Reversed(HH)",
+                            style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                        )
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            text = "• First 2 digits: Current Minute (MM)\n• Last 2 digits: Reversed Hour (HH)",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                }
+                Spacer(Modifier.height(12.dp))
+                Text(
+                    text = "Right now (%02d:%02d):\n• Minute: %s\n• Hour: %02d (reversed: %s)\n👉 Current PIN: %s".format(
+                        h24, min, mm, h24, h24Rev, samplePin
+                    ),
+                    style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold),
+                    color = MaterialTheme.colorScheme.primary,
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Got it")
+            }
+        },
+    )
+}
+
+/** A stealth dynamic PIN keypad dialog for double protection on Private Vault. */
+@Composable
+fun StealthLockDialog(
+    onDismiss: () -> Unit,
+    onVerified: () -> Unit,
+) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    var pin by remember { mutableStateOf("") }
+    var error by remember { mutableStateOf<String?>(null) }
+
+    fun checkPin(entered: String) {
+        if (entered.length < 4) return
+        val now = Calendar.getInstance()
+        val candidates = listOf(
+            now.clone() as Calendar,
+            (now.clone() as Calendar).apply { add(Calendar.MINUTE, -1) },
+            (now.clone() as Calendar).apply { add(Calendar.MINUTE, 1) },
+        )
+        var valid = false
+        for (cal in candidates) {
+            val min = cal.get(Calendar.MINUTE)
+            val h24 = cal.get(Calendar.HOUR_OF_DAY)
+            val h12 = cal.get(Calendar.HOUR).let { if (it == 0) 12 else it }
+            val mm = "%02d".format(min)
+            val h24Rev = "%02d".format(h24).reversed()
+            val h12Rev = "%02d".format(h12).reversed()
+            if (entered == "$mm$h24Rev" || entered == "$mm$h12Rev") {
+                valid = true
+                break
+            }
+        }
+        if (valid) {
+            ZarcHaptics.success(context)
+            onVerified()
+        } else {
+            ZarcHaptics.error(context)
+            error = "Incorrect PIN. Try again."
+            pin = ""
+        }
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(
+                    imageVector = ZarcIcons.Lock,
+                    contentDescription = null,
+                    tint = ZarcPalette.privateArea,
+                    modifier = Modifier.size(24.dp),
+                )
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    text = "Stealth Lock",
+                    style = MaterialTheme.typography.titleMedium,
+                    modifier = Modifier.weight(1f),
+                )
+            }
+        },
+        text = {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                Text(
+                    text = "Double protection for Private Vault",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(16.dp))
+
+                // PIN indicator dots
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(16.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    repeat(4) { index ->
+                        val filled = index < pin.length
+                        Box(
+                            modifier = Modifier
+                                .size(16.dp)
+                                .clip(CircleShape)
+                                .background(
+                                    if (filled) MaterialTheme.colorScheme.primary
+                                    else MaterialTheme.colorScheme.surfaceContainerHighest,
+                                ),
+                        )
+                    }
+                }
+
+                if (error != null) {
+                    Spacer(Modifier.height(10.dp))
+                    Text(
+                        text = error!!,
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+
+                Spacer(Modifier.height(20.dp))
+
+                val keys = listOf(
+                    listOf("1", "2", "3"),
+                    listOf("4", "5", "6"),
+                    listOf("7", "8", "9"),
+                    listOf("C", "0", "⌫"),
+                )
+                keys.forEach { row ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceEvenly,
+                    ) {
+                        row.forEach { key ->
+                            Surface(
+                                shape = CircleShape,
+                                color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                                modifier = Modifier
+                                    .size(60.dp)
+                                    .padding(4.dp)
+                                    .clickable {
+                                        ZarcHaptics.click(context)
+                                        error = null
+                                        when (key) {
+                                            "C" -> pin = ""
+                                            "⌫" -> if (pin.isNotEmpty()) pin = pin.dropLast(1)
+                                            else -> {
+                                                if (pin.length < 4) {
+                                                    val newPin = pin + key
+                                                    pin = newPin
+                                                    if (newPin.length == 4) {
+                                                        checkPin(newPin)
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    },
+                            ) {
+                                Box(contentAlignment = Alignment.Center) {
+                                    Text(
+                                        text = key,
+                                        style = MaterialTheme.typography.titleMedium,
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    Spacer(Modifier.height(4.dp))
+                }
+            }
+        },
+        confirmButton = {},
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel")
+            }
+        },
+    )
 }

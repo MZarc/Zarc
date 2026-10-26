@@ -4,7 +4,7 @@
 
 Zarc is a prototype. If you find a vulnerability in the crypto core, the
 container format or the Android adapter, please report it privately to the
-maintainer instead of opening a public issue. Include:
+maintainer (Meet Mistry, meetzarc@gmail.com) instead of opening a public issue. Include:
 
 * a description of the problem and its impact,
 * the steps to reproduce it, ideally with a test,

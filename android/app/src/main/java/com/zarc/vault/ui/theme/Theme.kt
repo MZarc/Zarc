@@ -11,9 +11,22 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.Font
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
 import androidx.core.view.WindowCompat
+import com.zarc.vault.R
+
+val AndikaFontFamily = FontFamily(
+    Font(R.font.andika_regular, FontWeight.Normal, FontStyle.Normal),
+    Font(R.font.andika_bold, FontWeight.Bold, FontStyle.Normal),
+    Font(R.font.andika_bold, FontWeight.SemiBold, FontStyle.Normal),
+    Font(R.font.andika_regular, FontWeight.Medium, FontStyle.Normal),
+    Font(R.font.andika_italic, FontWeight.Normal, FontStyle.Italic),
+    Font(R.font.andika_bold_italic, FontWeight.Bold, FontStyle.Italic)
+)
 
 /**
  * The colour scheme of the gallery.
@@ -69,20 +82,20 @@ object ZarcPalette {
     val favourite = Color(0xFFFFC44D)
 }
 
-/** The typography of the gallery: a little tighter than the Material default. */
+/** The typography of the gallery: using Andika font family. */
 private val ZarcTypography = Typography(
-    displaySmall = TextStyle(fontSize = 30.sp, lineHeight = 36.sp, fontWeight = FontWeight.SemiBold),
-    headlineMedium = TextStyle(fontSize = 26.sp, lineHeight = 32.sp, fontWeight = FontWeight.SemiBold),
-    headlineSmall = TextStyle(fontSize = 22.sp, lineHeight = 28.sp, fontWeight = FontWeight.SemiBold),
-    titleLarge = TextStyle(fontSize = 20.sp, lineHeight = 26.sp, fontWeight = FontWeight.SemiBold),
-    titleMedium = TextStyle(fontSize = 16.sp, lineHeight = 22.sp, fontWeight = FontWeight.Medium),
-    titleSmall = TextStyle(fontSize = 14.sp, lineHeight = 20.sp, fontWeight = FontWeight.Medium),
-    bodyLarge = TextStyle(fontSize = 15.sp, lineHeight = 21.sp),
-    bodyMedium = TextStyle(fontSize = 14.sp, lineHeight = 20.sp),
-    bodySmall = TextStyle(fontSize = 12.sp, lineHeight = 17.sp),
-    labelLarge = TextStyle(fontSize = 14.sp, lineHeight = 18.sp, fontWeight = FontWeight.Medium),
-    labelMedium = TextStyle(fontSize = 12.sp, lineHeight = 16.sp, fontWeight = FontWeight.Medium),
-    labelSmall = TextStyle(fontSize = 11.sp, lineHeight = 15.sp),
+    displaySmall = TextStyle(fontFamily = AndikaFontFamily, fontSize = 30.sp, lineHeight = 36.sp, fontWeight = FontWeight.SemiBold),
+    headlineMedium = TextStyle(fontFamily = AndikaFontFamily, fontSize = 26.sp, lineHeight = 32.sp, fontWeight = FontWeight.SemiBold),
+    headlineSmall = TextStyle(fontFamily = AndikaFontFamily, fontSize = 22.sp, lineHeight = 28.sp, fontWeight = FontWeight.SemiBold),
+    titleLarge = TextStyle(fontFamily = AndikaFontFamily, fontSize = 20.sp, lineHeight = 26.sp, fontWeight = FontWeight.SemiBold),
+    titleMedium = TextStyle(fontFamily = AndikaFontFamily, fontSize = 16.sp, lineHeight = 22.sp, fontWeight = FontWeight.Medium),
+    titleSmall = TextStyle(fontFamily = AndikaFontFamily, fontSize = 14.sp, lineHeight = 20.sp, fontWeight = FontWeight.Medium),
+    bodyLarge = TextStyle(fontFamily = AndikaFontFamily, fontSize = 15.sp, lineHeight = 21.sp),
+    bodyMedium = TextStyle(fontFamily = AndikaFontFamily, fontSize = 14.sp, lineHeight = 20.sp),
+    bodySmall = TextStyle(fontFamily = AndikaFontFamily, fontSize = 12.sp, lineHeight = 17.sp),
+    labelLarge = TextStyle(fontFamily = AndikaFontFamily, fontSize = 14.sp, lineHeight = 18.sp, fontWeight = FontWeight.Medium),
+    labelMedium = TextStyle(fontFamily = AndikaFontFamily, fontSize = 12.sp, lineHeight = 16.sp, fontWeight = FontWeight.Medium),
+    labelSmall = TextStyle(fontFamily = AndikaFontFamily, fontSize = 11.sp, lineHeight = 15.sp),
 )
 
 /** The dark theme of Zarc. */

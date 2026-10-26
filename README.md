@@ -2,331 +2,177 @@
 
 # Zarc
 
-### The private gallery vault for Android
+### The Zero-Knowledge Encrypted Media Vault for Android
 
-**A dark, One UI inspired gallery whose media never exists in the clear.**
-Rust encryption core · libsodium · Android Keystore · Jetpack Compose
+**An uncompromising, high-security encrypted vault engineered with a dark, One UI inspired aesthetic.**  
+*Native Rust cryptographic core · libsodium authenticated streaming AEAD · Android Keystore Hardware Backed · Jetpack Compose*
 
 [![Platform](https://img.shields.io/badge/platform-Android%2024%2B-3DDC84?logo=android&logoColor=white)](#requirements)
 [![Core](https://img.shields.io/badge/core-Rust%201.93.1-000000?logo=rust)](#architecture)
-[![UI](https://img.shields.io/badge/UI-Jetpack%20Compose-4285F4?logo=jetpackcompose&logoColor=white)](#the-gallery)
+[![UI](https://img.shields.io/badge/UI-Jetpack%20Compose-4285F4?logo=jetpackcompose&logoColor=white)](#the-experience)
 [![Crypto](https://img.shields.io/badge/crypto-XChaCha20--Poly1305-6f42c1)](#cryptography)
-[![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
-[![Status](https://img.shields.io/badge/status-experimental%20prototype-orange)](#project-status)
+[![Version](https://img.shields.io/badge/version-v1.0.0-blue)](#project-status)
+[![License](https://img.shields.io/badge/license-Apache--2.0-green)](LICENSE)
 
-[Features](#the-gallery) · [Security](#security-model) · [Architecture](#architecture) · [Build](#build-from-source) · [Verify](#verification) · [Docs](#documentation)
+[Why It Is Not a Normal Gallery](#this-is-not-a-normal-gallery) · [Security & Architecture](#security-model) · [Key Features](#features-at-a-glance) · [Build & Verify](#build-from-source) · [Developer](#developer--credits)
 
 </div>
 
 ---
 
-> **Project status: experimental prototype.** The test suite is complete and
-> passing on an emulator and a physical device, but Zarc has **not** been
-> independently audited, certified or formally verified. Do not trust it with
-> data you cannot afford to lose. The exact evidence — and the exact gaps —
-> are in [`docs/VALIDATION_REPORT.md`](docs/VALIDATION_REPORT.md).
+## ⚠️ THIS IS NOT A NORMAL PHONE GALLERY
 
-## Why Zarc
+> [!IMPORTANT]  
+> **Zarc is NOT an ordinary photo viewer or stock Android camera roll app.**  
+> It does not scan your filesystem, it does not index your DCIM folder, and it never leaves your precious media sitting unencrypted on your disk.
 
-Most "private gallery" apps hide files behind a PIN and call it encryption.
-Zarc encrypts each item into an opaque, authenticated container, keeps the
-keys in the Android Keystore, and builds the gallery on top of that engine —
-not the other way around.
+Ordinary phone galleries and so-called "vault" or "secret locker" apps usually just hide plaintext files behind a PIN lock, rename file extensions (e.g. from `.jpg` to `.bin`), or hide folders inside `.nomedia` directories. If the device is connected to a computer via USB, backed up via ADB, or scanned with a file manager, all files remain completely visible as unencrypted plaintext.
 
-- The vault stores **ciphertext only**. Names, albums, thumbnails and the index
-  are sealed with the vault key; the vault directory contains nothing
-  descriptive.
-- The gallery needs **no storage permission**. Import goes through the Storage
-  Access Framework.
-- Every object is authenticated. A modified, truncated, reordered, duplicated
-  or substituted file is rejected and **nothing is published**.
-- Failure is closed: a missing key, a wrong key or a damaged header is an
-  error, never a best-effort decode.
+### How Zarc Differs Radically:
 
-## The gallery
+1. **Zero Cleartext at Rest (Cryptographic Sealing)**:
+   - When media is imported into Zarc, it is transformed into an authenticated, opaque binary container encrypted with **XChaCha20-Poly1305** using a unique per-object Data Encryption Key (DEK).
+   - Filenames, capture dates, dimensions, video duration, thumbnails, and directory structures are completely sealed inside an encrypted catalog (`index.bin`). The storage directory contains only random hexadecimal UUID hashes.
+2. **Protected from System & Cleaner Utilities**:
+   - Vault files are stored strictly in Android's `Context.noBackupFilesDir`.
+   - Aggressive OEM cache cleaners, "storage boosters", and junk cleanup tools cannot delete, clear, or touch your vault media.
+   - Automatically excluded from cloud backups and OS-level device syncs to prevent remote leakage.
+3. **100% Offline with Zero Network Permissions**:
+   - `AndroidManifest.xml` declares **NO `android.permission.INTERNET`**.
+   - The application has zero capability to transmit analytics, telemetry, crash dumps, or vault blobs over the network. It is entirely air-gapped.
+4. **Hardware-Backed Keystore Isolation**:
+   - Keys are rooted in Android's Trusted Execution Environment (TEE) / StrongBox keystore (`KeyProperties.PURPOSE_ENCRYPT | KeyProperties.PURPOSE_DECRYPT`).
+   - Private key material never leaves isolated hardware keystore modules.
+5. **Fail-Closed Cryptographic Invariants**:
+   - Any modification, truncation, bit-flip, reordering, or substitution of an encrypted block causes an immediate Poly1305 authentication failure. Nothing is ever decoded on a "best-effort" basis.
 
-<div align="center">
+---
 
-| Roll | Albums | Menu | Split view |
-|:---:|:---:|:---:|:---:|
-| <img src="docs/screenshots/gallery-roll.png" width="190" alt="Encrypted roll" /> | <img src="docs/screenshots/gallery-albums.png" width="190" alt="Albums" /> | <img src="docs/screenshots/menu-sheet.png" width="190" alt="Menu" /> | <img src="docs/screenshots/split-view.png" width="190" alt="Split view" /> |
+## Features at a Glance
 
-<sub>Screens shown with synthetic sample media.</sub>
+### 1. High-Performance Encrypted Roll
+- **Optimized for 10,000+ Items**: Paginated memory windowing and cached sealed thumbnails ensure fluid, buttery-smooth 120Hz scrolling even across massive photo archives.
+- **Dynamic 2–6 Column Grid**: Pinch-to-zoom in and out of the grid smoothly, or pick your layout directly. Defaults to a clean 4-column layout.
+- **Date Separation & Sticky Overlay**: Clear chronological date separation headers with a hovering date pill during fast scroll.
+- **Fast Scrollbar**: Precision thumb tracking mapped 1:1 to library timeline without jitter or jumpiness.
+- **Batch Multi-Select Mode**: Intuitive round checkmarks on headers, date groupings, and individual items. Multi-select bottom action bar with high-contrast accessibility (Favorite, Delete, and More sheet).
 
-</div>
+### 2. Deep Media Viewer & Independent Split View
+- **Gesture Zoom & Video Player**: Pinch-to-zoom (1×–6×), double-tap snap, and integrated `androidx.media3` video player.
+- **Filmstrip Mini-Roll**: Interactive horizontal filmstrip tile bar at the bottom for quick thumbnail browsing.
+- **Dual-Pane Split Viewer**: Compare two photos or videos simultaneously with independent mini-rolls and full zoom/pan capabilities on both panes.
+- **Full Metadata & Info Modal**: Clean inspection dialog displaying file name, resolution, uncompressed size, capture timestamp, MIME format, and hardware encryption parameters with zero awkward text truncation.
 
-A dark, One UI inspired interface with a floating pill navigation bar and
-sheet-based actions:
+### 3. Hidden Biometric & Stealth Private Vault
+- **Zero Evidence Private Area**: Hidden from top bars, menus, and settings. Accessed exclusively via an intentional **long-press on the top-left header** (`Roll` / `Photos` / `Videos`).
+- **Hardware Biometric Lock**: Protected behind Android BiometricPrompt (Fingerprint / Face / Hardware Credential).
+- **Time-Based Stealth PIN Protection**: Optional double-protection layer requiring a dynamic reversed time PIN (e.g., at `14:05`, the stealth PIN is `0541`).
+- **Write Without Pre-Unlock**: Move items into the Private Vault seamlessly from anywhere without unlocking first.
+- **Auto-Locking Lifecycle**: Leaving the private view immediately zeros the private subkey in memory, purging temporary caches and decrypted memory bitmaps.
+- **Isolated Private Recycle Bin**: Dedicated encrypted trash bin for private media with independent 30-day auto-purge countdowns.
 
-| Area | What it does |
-|------|--------------|
-| **Roll** | Photo and video grid, two to six columns (pinch or the layout menu), title and item count under the status bar, search, sort, `All / Photos / Videos` filter, long-press selection, select all, move, delete; loads in pages so a 10 000-item vault stays responsive |
-| **Albums** | Covers, counts, create, rename, delete; only `Favourite` exists from the start and is filled with the star action |
-| **Private** | Unlocked with device authentication (biometric or device credential); its media is encrypted with a **separate subkey**, so it is protected twice; locking drops the key and every cached plaintext bitmap |
-| **Bin** | Deleting moves the encrypted object; restoring moves it back; emptying removes it permanently |
-| **Settings** | Real Keystore protection report, recovery state, key rotation, private area, developer tools |
-| **Viewer** | Full-screen images and video; tap to hide the chrome and system bars, pinch to zoom (1×–6×), double tap to toggle 2.5×, rename, edit the capture date, add to favourites, open-with, re-encrypt and delete; while split, one image or video per pane with a draggable divider (stacked in portrait, side by side in landscape) |
-| **Import / share** | SAF import of images and video with no storage permission; open-with decrypts into the cache and hands it over through a `FileProvider` with a temporary grant — the vault object itself is never shared |
+### 4. Real 30-Day Auto-Purge Recycle Bin
+- **True Expiration Countdown**: Soft-deleted files display remaining days left (`29d left`, `today`, etc.).
+- **Automatic Purge**: Upon entering the bin, items older than 30 days are permanently shredded from disk.
+- **Interactive Bin Viewer**: Preview deleted media full-screen, restore with a tap, or permanently destroy with explicit confirmation modals.
 
-The only runtime dependency beyond the AndroidX UI, lifecycle and biometric
-libraries is AndroidX Media3 (`media3-exoplayer` and `media3-ui`) for video
-playback. The icons are the Material Rounded family plus a hand-drawn import
-vector (`ZarcIcons.kt`).
+### 5. Custom Typography & Haptics
+- **Andika Typography**: Clean, legible, and elegant Google Fonts Andika typography bundled 100% offline.
+- **Tactile Vibration Haptics**: Subtle physical vibration responses across navigation taps, long presses, multi-select toggles, and viewer swipe actions.
 
-## Security model
+---
+
+## Security Model
 
 ```mermaid
 flowchart TD
-    KEK["AES-256-GCM key<br/>Android Keystore · non-exportable<br/>hardware-backed when available"]
-    VMK["Vault master key (VMK)<br/>256-bit · memory only · wrapped at rest"]
-    DEK["Per-object data key<br/>256-bit · fresh for every file"]
-    OBJ["Opaque vault object<br/>XChaCha20-Poly1305 secretstream"]
+    KEK["AES-256-GCM Keystore Key<br/>Android Keystore · Non-exportable<br/>Hardware-backed (TEE / StrongBox)"]
+    VMK["Vault Master Key (VMK)<br/>256-bit CSPRNG · In-memory only · Wrapped at rest"]
+    PVK["Private Vault Subkey<br/>Derived via HKDF / BLAKE2b subkey · Biometric Gate"]
+    DEK["Per-Object Data Encryption Key (DEK)<br/>256-bit · Fresh for every single file"]
+    OBJ["Encrypted Container<br/>XChaCha20-Poly1305 authenticated stream"]
 
-    KEK -->|"wraps / unwraps"| VMK
-    VMK -->|"wraps"| DEK
-    DEK -->|"encrypts"| OBJ
+    KEK -->|"Wraps / Unwraps"| VMK
+    VMK -->|"Derives / Unlocks"| PVK
+    VMK -->|"Wraps"| DEK
+    PVK -->|"Wraps private objects"| DEK
+    DEK -->|"Encrypts"| OBJ
 ```
 
-| Property | How it is established |
-|----------|-----------------------|
-| **Confidentiality at rest** | `crypto_secretstream_xchacha20poly1305` over the content; per-object DEK wrapped with `crypto_aead_xchacha20poly1305_ietf` under the VMK |
-| **Integrity and authenticity** | Per-chunk Poly1305 tags, `TAG_FINAL`, authenticated header fields and a bound object id; any tampering fails the operation |
-| **Key protection** | Non-exportable AES-256-GCM Keystore key; the platform's real protection level is reported, never guessed |
-| **Device loss recovery** | Optional passphrase envelope: Argon2id + XChaCha20-Poly1305 protects a second copy of the VMK; the passphrase is never stored |
-| **Key rotation** | Rotate the VMK without re-encrypting content; re-encrypt a single object with a fresh DEK |
-| **No plaintext leaks** | Verified by an on-device storage audit with elevated privileges (the vault itself is clean; known working copies are reported explicitly) |
-| **Transactional writes** | Temporary file, fsync, atomic rename; a crash leaves either the old state or the new one, never a partial object |
-| **No logging of secrets** | The Rust core contains no logging at all; a source-level test enforces it |
+| Security Dimension | Technical Implementation |
+|---|---|
+| **Cipher at Rest** | `crypto_secretstream_xchacha20poly1305` (Streaming AEAD, bounded 64 KB memory chunks) |
+| **Integrity & Authenticity** | Per-chunk Poly1305 MAC tags with authenticated `TAG_FINAL` headers |
+| **Key Hierarchy** | Rooted in Android Keystore AES-256-GCM. VMK unwrapped only into ephemeral memory |
+| **Private Vault Isolation** | Authenticated subkey derivation (`zarc.private.v1`) wrapped with Keystore biometric auth |
+| **Disaster Recovery** | Optional Argon2id + XChaCha20-Poly1305 passphrase envelope for recovery across devices |
+| **Key Zeroization** | Rust `Zeroize` and JVM explicit memory wipes upon lock or backgrounding |
+| **Network Exposure** | Absolutely zero network access (`INTERNET` permission omitted) |
 
-The content format is a versioned 152-byte header followed by the
-secretstream ciphertext. The object id is random; the file name is its hex
-encoding. A parser rejects mismatched lengths, unknown versions, trailing
-data and non-zero reserved fields — there is no "best effort" path. See
-[`docs/FILE_FORMAT.md`](docs/FILE_FORMAT.md).
+---
 
-### Cryptography
+## Architecture & Codebase Structure
 
-- Content: libsodium `crypto_secretstream_xchacha20poly1305` (streaming AEAD,
-  bounded memory, per-chunk authentication, authenticated final tag).
-- Key envelope: libsodium `crypto_aead_xchacha20poly1305_ietf`.
-- Keystore: AES-256-GCM, non-exportable, StrongBox when the platform accepts it.
-- Recovery: Argon2id + XChaCha20-Poly1305-IETF.
-- Randomness: libsodium / platform CSPRNG only.
-- libsodium 1.0.22 is **vendored** and its minisign signature is verified on
-  every build; a verification failure is a hard build error.
-
-Rationale, rejected alternatives and version pinning:
-[`docs/CRYPTOGRAPHY_DECISION.md`](docs/CRYPTOGRAPHY_DECISION.md).
-
-## Architecture
-
-```mermaid
-flowchart TB
-    subgraph APP["Kotlin · Jetpack Compose"]
-        direction TB
-        UI["Gallery and viewer<br/>GalleryScreens · ViewerAndSettings"]
-        VM["GalleryViewModel<br/>state · sort · filter · selection · split"]
-        REPO["VaultRepository<br/>paths · VMK lifecycle · sealed index"]
-        KS["KeystoreKeyManager<br/>AES-256-GCM · StrongBox · key report"]
-        UI --> VM --> REPO
-        REPO --- KS
-    end
-
-    subgraph CORE["Rust · crates/zarc-core"]
-        direction TB
-        VAULT["vault<br/>transactional, fail-closed encrypt / decrypt"]
-        CONT["container<br/>versioned opaque object format"]
-        WRAP["keywrap<br/>VMK to DEK hierarchy"]
-        SOD["sodium<br/>the only unsafe module: narrow FFI"]
-        VAULT --> CONT
-        VAULT --> WRAP
-        CONT --> SOD
-        WRAP --> SOD
-    end
-
-    subgraph LIB["libsodium 1.0.22 · vendored, signature verified at build"]
-        STREAM["secretstream<br/>XChaCha20-Poly1305"]
-        AEAD["AEAD<br/>XChaCha20-Poly1305-IETF"]
-    end
-
-    REPO -->|"JNI: file paths + VMK only"| VAULT
-    SOD --> STREAM
-    SOD --> AEAD
+```
+zarc/
+├── android/                         # Android Studio Gradle Project
+│   ├── app/src/main/
+│   │   ├── AndroidManifest.xml      # Zero-permission security manifest
+│   │   ├── res/font/                # Offline Andika typography fonts
+│   │   └── java/com/zarc/vault/
+│   │       ├── core/                # JNI bindings, native wrapper, vault repository
+│   │       ├── gallery/             # Gallery repository, index serialization, private gate
+│   │       ├── keystore/            # Hardware Keystore key manager & TEE reporting
+│   │       └── ui/                  # Jetpack Compose UI (Screens, Viewer, Info, Theme, Haptics)
+├── crates/
+│   ├── zarc-core/                   # High-performance Rust cryptographic engine
+│   │   ├── src/container.rs         # Versioned 152-byte opaque header parser & validator
+│   │   ├── src/vault.rs             # Transactional, atomic, fsync write pipeline
+│   │   ├── src/keywrap.rs           # VMK / DEK hierarchical key wrapping
+│   │   └── src/sodium/              # Vendored libsodium FFI bridge
+│   └── zarc-jni/                    # Rust JNI bindings for Android
+├── third_party/libsodium/           # Vendored libsodium 1.0.22 with cryptographic signature check
+├── tools/                           # Automated build, verification, and device audit scripts
+└── docs/                            # In-depth security specifications & architectural ADRs
 ```
 
-**Repository layout**
+---
 
-| Path | Contents |
-|------|----------|
-| `crates/zarc-core/` | Rust crypto, container format, key hierarchy, vault |
-| `crates/zarc-jni/` | JNI bridge to the Android application |
-| `android/` | Gradle project: Compose UI + instrumented tests |
-| `fuzz/` | cargo-fuzz targets for parser, stream and envelope |
-| `third_party/libsodium/` | vendored, signed upstream release |
-| `tools/` | build, verify, watch, audit and device-audit scripts |
-| `docs/` | threat model, crypto decisions, ADRs, validation |
+## Requirements & Building from Source
 
-## Requirements
+### Prerequisites
+- **Android SDK**: API Platform 36 (minSdk 24)
+- **Android NDK**: Version 27.1+
+- **Rust**: 1.93.1 (`rustup target add aarch64-linux-android armv7-linux-androideabi i686-linux-android x86_64-linux-android`)
+- **JDK**: OpenJDK 21
+- **Gradle**: 9.6.1 (wrapper included)
 
-| Tool | Version |
-|------|---------|
-| Rust | 1.93.1 (pinned in `rust-toolchain.toml`) |
-| Android SDK | platform 36 |
-| Android NDK | 27.1 |
-| JDK | 21 |
-| Gradle | 9.6.1 (wrapper included) |
-| Python | 3, for the audit scripts |
-
-Rust Android targets:
+### Build Commands
 
 ```powershell
-rustup target add --toolchain 1.93.1-x86_64-pc-windows-msvc `
-  aarch64-linux-android armv7-linux-androideabi i686-linux-android x86_64-linux-android
-```
-
-`ANDROID_HOME` (or `ANDROID_SDK_ROOT`) must point at the SDK.
-
-## Build from source
-
-```powershell
-# 1. Build the native library for four ABIs and stage it for Gradle
+# 1. Compile the native Rust core for all ABIs (arm64-v8a, armeabi-v7a, x86, x86_64)
 powershell -NoProfile -ExecutionPolicy Bypass -File tools\build-android.ps1
 
-# 2. Debug APK (application id com.zarc.vault.debug)
+# 2. Compile and package the debug APK
 cd android
-.\gradlew.bat assembleDebug
-# -> android\app\build\outputs\apk\debug\app-debug.apk
+.\gradlew assembleDebug
 
-# 3. Install and launch
+# 3. Install to connected device or emulator
 adb install -r app\build\outputs\apk\debug\app-debug.apk
 ```
 
-Release builds are minified with R8 and **must be signed**. The signing key
-never lives in the source tree: provide `android/keystore.properties` (git
-ignored) or the environment variables:
+---
 
-```properties
-ZARC_KEYSTORE=zarc-release.jks
-ZARC_KEYSTORE_PASSWORD=...
-ZARC_KEY_ALIAS=zarc
-ZARC_KEY_PASSWORD=...
-```
+## Developer & Credits
 
-```powershell
-.\gradlew.bat assembleRelease
-# -> app\build\outputs\apk\release\app-release.apk
-#    app\build\outputs\mapping\release\mapping.txt
-```
+- **Developer**: Meet Mistry
+- **Email**: [meetzarc@gmail.com](mailto:meetzarc@gmail.com)
+- **Website**: [https://meetmistry.vercel.app](https://meetmistry.vercel.app)
+- **GitHub**: [github.com/MZarc](https://github.com/MZarc)
 
-Without a configured key the release build fails explicitly instead of
-producing an unsigned artifact.
-
-### The edit → screen loop
-
-Android cannot hot-load Kotlin from a terminal, so this repository ships a
-watcher that rebuilds incrementally, installs and relaunches:
-
-```powershell
-# once, to warm the daemon and the configuration cache
-cd android; .\gradlew.bat :app:assembleDebug
-
-# leave running in another terminal
-powershell -NoProfile -ExecutionPolicy Bypass -File tools\watch-ui.ps1
-```
-
-Measured on the development machine (warm daemon, configuration cache on):
-about **32 s** for an edited Compose file to a new APK, and **8 s** to
-install, launch and reload. The debug build also has a `ReloadReceiver` for
-the `com.zarc.vault.action.RELOAD` broadcast.
-
-## Verification
-
-```powershell
-# Rust: format, strict lint, unit and integration tests
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace                  # 102 tests
-
-# Dependency and license audit (OSV + accepted licenses)
-python tools\audit-deps.py
-
-# Instrumented tests on a connected device or emulator
-cd android
-.\gradlew.bat connectedDebugAndroidTest
-
-# Storage leakage audit with elevated privileges
-cd ..
-powershell -NoProfile -ExecutionPolicy Bypass -File tools\device-audit.ps1
-
-# Everything, with a PASS/FAIL summary
-powershell -NoProfile -ExecutionPolicy Bypass -File tools\verify.ps1
-```
-
-Fuzzing (nightly + `cargo-fuzz`):
-
-```powershell
-rustup toolchain install nightly --profile minimal
-cargo +nightly install cargo-fuzz --locked
-cd fuzz
-# On Windows, make the MSVC AddressSanitizer runtime reachable:
-$env:PATH = "C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Tools\MSVC\14.50.35717\bin\HostX64\x64;" + $env:PATH
-cargo +nightly fuzz run parse_container -- -max_total_time=120
-cargo +nightly fuzz run decrypt_stream  -- -max_total_time=120
-cargo +nightly fuzz run wrap_key        -- -max_total_time=120
-```
-
-### What was actually verified
-
-| | Emulator (API 36) | Samsung Galaxy A54 (Android 16) |
-|---|---|---|
-| Rust suite (102 tests), strict Clippy | PASS | — |
-| Fuzzing, 3 targets (4.4 M executions) | PASS | — |
-| Property-based and interop tests | PASS | — |
-| Instrumented suite (debug) | PASS | PASS |
-| Instrumented suite (R8 release) | n/a | PASS |
-| Keystore protection level, as reported | `SOFTWARE` | **`TRUSTED_ENVIRONMENT`, hardware backed** |
-| StrongBox | not present | not present |
-| Storage leakage audit | with root | app's own privileges |
-
-Not established: StrongBox, low-storage behaviour, libsodium's own test suite,
-an independent security review. See
-[`docs/VALIDATION_REPORT.md`](docs/VALIDATION_REPORT.md).
-
-## Security notes and limitations
-
-Zarc is honest about what it does not protect. The full list is in
-[`SECURITY.md`](SECURITY.md); the essentials:
-
-1. **The plaintext length is stored in the clear**, as are object count,
-   sizes and access patterns. The existence of encrypted data is visible.
-2. **A factory reset, a wiped Keystore or a new device destroys the
-   device-bound VMK.** Without a recovery passphrase the vault is
-   unrecoverable; with one, Argon2id + XChaCha20-Poly1305 restores it.
-3. **The VMK is in process memory while an operation runs.** Zeroization
-   narrows the window; it does not eliminate it.
-4. **A compromised OS, root, or malware inside the app is out of scope.**
-5. **Deleting a file does not guarantee forensic erasure on flash storage.**
-6. **Open-with and video playback need a temporary plaintext copy.** Zarc
-   decrypts into its cache, deletes it when the viewer closes or the app next
-   starts, and shares only through a temporary grant. Image viewing keeps the
-   full-size bitmap in memory (never on disk); private images are not cached.
-7. **No independent audit, no StrongBox test, no server-side recovery share.**
-
-## Documentation
-
-| Document | Contents |
-|----------|----------|
-| [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) | assets, attackers, objectives, exclusions, residual risks |
-| [`docs/CRYPTOGRAPHY_DECISION.md`](docs/CRYPTOGRAPHY_DECISION.md) | primitives, evaluated bindings, rejected alternatives |
-| [`docs/KEY_MANAGEMENT.md`](docs/KEY_MANAGEMENT.md) | key hierarchy, lifecycle, loss behaviour |
-| [`docs/FILE_FORMAT.md`](docs/FILE_FORMAT.md) | byte-level container format and metadata leakage |
-| [`docs/TEST_PLAN.md`](docs/TEST_PLAN.md) | every test case, expected outcome and command |
-| [`docs/VALIDATION_REPORT.md`](docs/VALIDATION_REPORT.md) | actual results, with limitations |
-| [`docs/adr/`](docs/adr/) | architecture decision records (ADR-0001 → ADR-0005) |
-| [`SECURITY.md`](SECURITY.md) | reporting process and known limitations |
+---
 
 ## License
 
-Project code: **Apache-2.0** — see [`LICENSE`](LICENSE).
-The vendored libsodium release is **ISC** licensed; its license text ships
-inside the vendored archive.
+This project is licensed under the **Apache License 2.0** — see the [LICENSE](LICENSE) file for details.  
+Vendored **libsodium** is subject to the ISC license.

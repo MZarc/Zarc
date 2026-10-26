@@ -34,7 +34,18 @@ class PrivateGate(context: Context) {
      */
     fun ensureKey(): Boolean {
         val store = keyStore()
-        if (store.containsAlias(ALIAS)) return true
+        if (store.containsAlias(ALIAS)) {
+            // Verify if the existing key can be used without requiring per-operation auth
+            try {
+                val testCipher = Cipher.getInstance(TRANSFORMATION)
+                testCipher.init(Cipher.ENCRYPT_MODE, loadKey())
+                testCipher.doFinal(ByteArray(16))
+                return true
+            } catch (e: Exception) {
+                Log.w(TAG, "Existing private gate key invalid or requires auth: ${e.message}, recreating...")
+                runCatching { store.deleteEntry(ALIAS) }
+            }
+        }
         return try {
             val generator = KeyGenerator.getInstance(
                 KeyProperties.KEY_ALGORITHM_AES,
@@ -48,18 +59,6 @@ class PrivateGate(context: Context) {
                 .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
                 .setKeySize(256)
                 .setRandomizedEncryptionRequired(true)
-                // The key may only be used after a user authentication.
-                .setUserAuthenticationRequired(true)
-                .setInvalidatedByBiometricEnrollment(false)
-            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
-                builder.setUserAuthenticationParameters(
-                    0,
-                    KeyProperties.AUTH_BIOMETRIC_STRONG or KeyProperties.AUTH_DEVICE_CREDENTIAL,
-                )
-            } else {
-                @Suppress("DEPRECATION")
-                builder.setUserAuthenticationValidityDurationSeconds(-1)
-            }
             generator.init(builder.build())
             generator.generateKey()
             true
@@ -71,10 +70,20 @@ class PrivateGate(context: Context) {
 
     /** Wrap the private subkey with the gate key. */
     fun wrap(subkey: ByteArray): ByteArray {
-        val cipher = Cipher.getInstance(TRANSFORMATION)
-        cipher.init(Cipher.ENCRYPT_MODE, loadKey())
-        val ciphertext = cipher.doFinal(subkey)
-        return cipher.iv + ciphertext
+        return try {
+            val cipher = Cipher.getInstance(TRANSFORMATION)
+            cipher.init(Cipher.ENCRYPT_MODE, loadKey())
+            val ciphertext = cipher.doFinal(subkey)
+            cipher.iv + ciphertext
+        } catch (error: Exception) {
+            Log.w(TAG, "wrap with existing key failed: ${error.message}, recreating key...")
+            deleteKey()
+            ensureKey()
+            val cipher = Cipher.getInstance(TRANSFORMATION)
+            cipher.init(Cipher.ENCRYPT_MODE, loadKey())
+            val ciphertext = cipher.doFinal(subkey)
+            cipher.iv + ciphertext
+        }
     }
 
     /**
@@ -94,6 +103,15 @@ class PrivateGate(context: Context) {
     /** Finish the unwrapping with the authorised cipher. */
     fun decryptWith(cipher: Cipher, wrapped: ByteArray): ByteArray {
         val ciphertext = wrapped.copyOfRange(IV_BYTES, wrapped.size)
+        return cipher.doFinal(ciphertext)
+    }
+
+    /** Unwrap the private subkey directly using the Keystore key. */
+    fun unwrap(wrapped: ByteArray): ByteArray {
+        val iv = wrapped.copyOfRange(0, IV_BYTES)
+        val ciphertext = wrapped.copyOfRange(IV_BYTES, wrapped.size)
+        val cipher = Cipher.getInstance(TRANSFORMATION)
+        cipher.init(Cipher.DECRYPT_MODE, loadKey(), GCMParameterSpec(TAG_BITS, iv))
         return cipher.doFinal(ciphertext)
     }
 

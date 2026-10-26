@@ -203,6 +203,15 @@ class GalleryRepository(private val context: Context) {
     }
 
     /** Rename an album. */
+    fun setAlbumCover(albumId: String, mediaId: String?) {
+        val index = loadIndex()
+        val pos = index.albums.indexOfFirst { it.id == albumId }
+        if (pos >= 0) {
+            index.albums[pos] = index.albums[pos].copy(coverId = mediaId)
+            saveIndex(index)
+        }
+    }
+
     fun renameAlbum(albumId: String, name: String) {
         val index = loadIndex()
         index.albums.replaceAll { album -> if (album.id == albumId) album.copy(name = name) else album }
@@ -327,13 +336,14 @@ class GalleryRepository(private val context: Context) {
     fun moveToBin(ids: List<String>) {
         binDir.mkdirs()
         val index = loadIndex()
+        val now = System.currentTimeMillis()
         ids.forEach { id ->
             val source = File(objectsDir, id)
             if (source.exists()) source.renameTo(File(binDir, id))
             val thumb = File(thumbsDir, "$id.blob")
             if (thumb.exists()) thumb.renameTo(File(binDir, "$id.blob"))
         }
-        index.items.replaceAll { item -> if (item.id in ids) item.copy(isDeleted = true) else item }
+        index.items.replaceAll { item -> if (item.id in ids) item.copy(isDeleted = true, deletedAt = now) else item }
         saveIndex(index)
     }
 
@@ -347,7 +357,7 @@ class GalleryRepository(private val context: Context) {
             val thumb = File(binDir, "$id.blob")
             if (thumb.exists()) thumb.renameTo(File(thumbsDir, "$id.blob"))
         }
-        index.items.replaceAll { item -> if (item.id in ids) item.copy(isDeleted = false) else item }
+        index.items.replaceAll { item -> if (item.id in ids) item.copy(isDeleted = false, deletedAt = 0L) else item }
         saveIndex(index)
     }
 
@@ -364,6 +374,27 @@ class GalleryRepository(private val context: Context) {
         saveIndex(index)
     }
 
+    /**
+     * Permanently delete items that have been in the recycle bin for 30 or more days.
+     * Returns the count of purged items.
+     */
+    fun purgeExpiredBinnedItems(): Int {
+        val now = System.currentTimeMillis()
+        val index = loadIndex()
+        val expired = index.items.filter { it.isDeleted && it.deletedAt > 0L && (now - it.deletedAt >= BIN_EXPIRATION_MILLIS) }
+        if (expired.isEmpty()) return 0
+        val expiredIds = expired.map { it.id }.toSet()
+        expiredIds.forEach { id ->
+            File(binDir, id).delete()
+            File(binDir, "$id.blob").delete()
+            File(objectsDir, id).delete()
+            File(thumbsDir, "$id.blob").delete()
+        }
+        index.items.removeAll { it.id in expiredIds }
+        saveIndex(index)
+        return expired.size
+    }
+
     /** Empty the recycle bin. */
     fun emptyBin() = deleteForever(loadIndex().deleted.map { it.id })
 
@@ -378,12 +409,17 @@ class GalleryRepository(private val context: Context) {
      * the vault key *and* by the device authentication.
      */
     fun enablePrivateArea(): Boolean {
-        val gate = PrivateGate(context)
-        if (!gate.ensureKey()) return false
-        val key = privateSubkey() ?: return false
-        privateGateFile.parentFile?.mkdirs()
-        privateGateFile.writeBytes(gate.wrap(key))
-        return true
+        return try {
+            val gate = PrivateGate(context)
+            if (!gate.ensureKey()) return false
+            val key = privateSubkey() ?: return false
+            privateGateFile.parentFile?.mkdirs()
+            privateGateFile.writeBytes(gate.wrap(key))
+            true
+        } catch (e: Exception) {
+            android.util.Log.e("GalleryRepo", "enablePrivateArea error: ${e.message}", e)
+            false
+        }
     }
 
     /** Whether the private area has been set up. */
@@ -412,6 +448,16 @@ class GalleryRepository(private val context: Context) {
     private fun privateKey(): ByteArray? = unlockedPrivateKey
 
     /** The directory that holds the objects of an area. */
+    /** The directory that holds the objects of an area or item. */
+    fun objectsDirOf(item: MediaItem): File =
+        if (item.isDeleted) {
+            if (item.isPrivate) privateBinDir else binDir
+        } else if (item.isPrivate) {
+            privateObjectsDir
+        } else {
+            objectsDir
+        }
+
     private fun objectsDirOf(isPrivate: Boolean): File =
         if (isPrivate) privateObjectsDir else objectsDir
 
@@ -434,7 +480,11 @@ class GalleryRepository(private val context: Context) {
 
     /** Read the sealed thumbnail of an item. */
     fun readThumbnail(isPrivate: Boolean, id: String): ByteArray? {
-        val file = File(if (isPrivate) privateThumbsDir else thumbsDir, "$id.blob")
+        val dir = if (isPrivate) privateThumbsDir else thumbsDir
+        var file = File(dir, "$id.blob")
+        if (!file.exists()) {
+            file = if (isPrivate) File(privateBinDir, "$id.blob") else File(binDir, "$id.blob")
+        }
         if (!file.exists()) return null
         return try {
             val key = if (isPrivate) unlockedPrivateKey ?: return null else vault.vaultMasterKey()
@@ -459,7 +509,7 @@ class GalleryRepository(private val context: Context) {
             ZarcNative.nativeDecryptFile(
                 key,
                 item.id,
-                objectsDirOf(item.isPrivate).absolutePath,
+                objectsDirOf(item).absolutePath,
                 viewerDir.absolutePath,
                 staged.name,
             )
@@ -502,7 +552,7 @@ class GalleryRepository(private val context: Context) {
         ZarcNative.nativeDecryptFile(
             key,
             item.id,
-            objectsDirOf(item.isPrivate).absolutePath,
+            objectsDirOf(item).absolutePath,
             viewerDir.absolutePath,
             file.name,
         )
@@ -528,7 +578,7 @@ class GalleryRepository(private val context: Context) {
         val path = ZarcNative.nativeDecryptFile(
             key,
             item.id,
-            objectsDirOf(item.isPrivate).absolutePath,
+            objectsDirOf(item).absolutePath,
             vault.workDir.absolutePath,
             stagedName,
         )
@@ -536,7 +586,7 @@ class GalleryRepository(private val context: Context) {
         val id = ZarcNative.nativeEncryptFile(
             key,
             source.absolutePath,
-            objectsDirOf(item.isPrivate).absolutePath,
+            objectsDirOf(item).absolutePath,
         )
         source.delete()
         return id
@@ -548,7 +598,7 @@ class GalleryRepository(private val context: Context) {
         val path = ZarcNative.nativeDecryptFile(
             key,
             item.id,
-            objectsDirOf(isPrivate).absolutePath,
+            objectsDirOf(item).absolutePath,
             vault.exportDir.absolutePath,
             "${item.id}.${item.extension.ifEmpty { "bin" }}",
         )
@@ -569,7 +619,7 @@ class GalleryRepository(private val context: Context) {
         val path = ZarcNative.nativeDecryptFile(
             key,
             item.id,
-            objectsDirOf(isPrivate).absolutePath,
+            objectsDirOf(item).absolutePath,
             exports.absolutePath,
             target.name,
         )
@@ -670,5 +720,157 @@ class GalleryRepository(private val context: Context) {
             }
         }
         return digest.digest().take(8).joinToString("") { "%02x".format(it) }
+    }
+
+    /** Move items from the private area back into the normal roll. */
+    val privateBinDir: File get() = File(context.noBackupFilesDir, "vault/private_bin")
+
+    /** Move items from normal gallery into the private vault without requiring pre-unlock. */
+    fun moveToPrivate(ids: List<String>) {
+        if (!hasPrivateArea()) {
+            enablePrivateArea()
+        }
+        val isPreUnlocked = (unlockedPrivateKey != null)
+        val privateKey = unlockedPrivateKey ?: privateSubkey() ?: return
+        try {
+            val vmk = vault.vaultMasterKey()
+            val privateIndex = loadPrivateIndex(privateKey)
+            val normalIndex = loadIndex()
+
+            ids.forEach { id ->
+                val item = normalIndex.find(id) ?: return@forEach
+                val ext = if (item.extension.isEmpty()) "bin" else item.extension
+                val staged = File(vault.workDir, "toprivate-$id.$ext")
+                try {
+                    ZarcNative.nativeDecryptFile(
+                        vmk,
+                        id,
+                        objectsDir.absolutePath,
+                        vault.workDir.absolutePath,
+                        staged.name,
+                    )
+                    val newId = ZarcNative.nativeEncryptFile(
+                        privateKey,
+                        staged.absolutePath,
+                        privateObjectsDir.absolutePath,
+                    )
+                    val newItem = item.copy(id = newId, isPrivate = true, albumId = VaultIndex.ALBUM_NONE, isFavorite = false)
+                    writeThumbnailWithKey(privateKey, newItem, staged)
+                    File(objectsDir, id).delete()
+                    File(thumbsDir, "$id.blob").delete()
+                    privateIndex.items.add(newItem)
+                    normalIndex.items.removeAll { it.id == id }
+                } catch (e: Exception) {
+                    android.util.Log.e("GalleryRepo", "moveToPrivate error: ${e.message}", e)
+                } finally {
+                    staged.delete()
+                }
+            }
+            savePrivateIndex(privateKey, privateIndex)
+            saveIndex(normalIndex)
+        } finally {
+            if (!isPreUnlocked) {
+                privateKey.fill(0)
+            }
+        }
+    }
+
+    private fun writeThumbnailWithKey(key: ByteArray, item: MediaItem, source: File) {
+        val bitmap = decodeScaled(source, 320) ?: return
+        val bytes = java.io.ByteArrayOutputStream().use { output ->
+            bitmap.compress(Bitmap.CompressFormat.JPEG, 82, output)
+            output.toByteArray()
+        }
+        bitmap.recycle()
+        val sealed = ZarcNative.nativeSealBlob(key, bytes)
+        privateThumbsDir.mkdirs()
+        File(privateThumbsDir, "${item.id}.blob").writeBytes(sealed)
+    }
+
+    /** Move private items into the private recycle bin. */
+    fun movePrivateToBin(ids: List<String>) {
+        val privateKey = unlockedPrivateKey ?: return
+        privateBinDir.mkdirs()
+        val index = loadPrivateIndex(privateKey)
+        val now = System.currentTimeMillis()
+        ids.forEach { id ->
+            val source = File(privateObjectsDir, id)
+            if (source.exists()) source.renameTo(File(privateBinDir, id))
+            val thumb = File(privateThumbsDir, "$id.blob")
+            if (thumb.exists()) thumb.renameTo(File(privateBinDir, "$id.blob"))
+        }
+        index.items.replaceAll { item -> if (item.id in ids) item.copy(isDeleted = true, deletedAt = now) else item }
+        savePrivateIndex(privateKey, index)
+    }
+
+    /** Restore private items from private recycle bin. */
+    fun restorePrivateFromBin(ids: List<String>) {
+        val privateKey = unlockedPrivateKey ?: return
+        val index = loadPrivateIndex(privateKey)
+        ids.forEach { id ->
+            val source = File(privateBinDir, id)
+            if (source.exists()) source.renameTo(File(privateObjectsDir, id))
+            val thumb = File(privateBinDir, "$id.blob")
+            if (thumb.exists()) thumb.renameTo(File(privateThumbsDir, "$id.blob"))
+        }
+        index.items.replaceAll { item -> if (item.id in ids) item.copy(isDeleted = false, deletedAt = 0L) else item }
+        savePrivateIndex(privateKey, index)
+    }
+
+    /** Permanently delete private items. */
+    fun deletePrivateForever(ids: List<String>) {
+        val privateKey = unlockedPrivateKey ?: return
+        val index = loadPrivateIndex(privateKey)
+        ids.forEach { id ->
+            File(privateBinDir, id).delete()
+            File(privateBinDir, "$id.blob").delete()
+            File(privateObjectsDir, id).delete()
+            File(privateThumbsDir, "$id.blob").delete()
+        }
+        index.items.removeAll { it.id in ids }
+        savePrivateIndex(privateKey, index)
+    }
+
+    fun moveOutOfPrivate(ids: List<String>) {
+        val privateKey = unlockedPrivateKey ?: return
+        val vmk = vault.vaultMasterKey()
+        val privateIndex = loadPrivateIndex(privateKey)
+        val normalIndex = loadIndex()
+
+        ids.forEach { id ->
+            val item = privateIndex.find(id) ?: return@forEach
+            val staged = File(vault.workDir, "unprivate-$id.${item.extension.ifEmpty { "bin" }}")
+            try {
+                ZarcNative.nativeDecryptFile(
+                    privateKey,
+                    id,
+                    privateObjectsDir.absolutePath,
+                    vault.workDir.absolutePath,
+                    staged.name,
+                )
+                val newId = ZarcNative.nativeEncryptFile(
+                    vmk,
+                    staged.absolutePath,
+                    objectsDir.absolutePath,
+                )
+                val newItem = item.copy(id = newId, isPrivate = false)
+                writeThumbnail(false, newItem, staged)
+                File(privateObjectsDir, id).delete()
+                File(privateThumbsDir, "$id.blob").delete()
+                normalIndex.items.add(newItem)
+                privateIndex.items.removeAll { it.id == id }
+            } catch (e: Exception) {
+                // Ignore failure on single item
+            } finally {
+                staged.delete()
+            }
+        }
+        savePrivateIndex(privateKey, privateIndex)
+        saveIndex(normalIndex)
+    }
+
+    companion object {
+        /** 30 days in milliseconds for the recycle bin expiration timer. */
+        const val BIN_EXPIRATION_MILLIS = 30L * 24 * 60 * 60 * 1000L
     }
 }

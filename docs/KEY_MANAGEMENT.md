@@ -91,6 +91,14 @@ that does expose `KeyInfo`, the level is reported from the platform.
 * **Lifetime.** It exists in memory during one encryption or decryption and
   is zeroized when the key type is dropped.
 
+## Layer 4: the Private Vault subkey (`zarc.private.v1`)
+
+* **Derivation.** Derived dynamically from the Vault Master Key using native BLAKE2b/HKDF subkey derivation (`ZarcNative.nativeDeriveSubkey(vmk, "zarc.private.v1")`).
+* **Hardware Biometric Envelope.** In the Private area, this subkey is further sealed inside a hardware Keystore biometric envelope (`PrivateGate`, using `KeyProperties.PURPOSE_WRAP_KEY | KeyProperties.PURPOSE_ENCRYPT`).
+* **Authentication Gate.** Unlocking requires hardware biometric authentication (`BiometricPrompt` with `BIOMETRIC_STRONG | DEVICE_CREDENTIAL`).
+* **Write Separation.** Normal gallery objects can be transferred and encrypted into the Private Vault by temporarily deriving the subkey on an isolated thread, encrypting the payload and thumbnail, and zeroizing the memory buffer immediately without requiring pre-unlock.
+* **Auto-Locking Lifecycle.** Exiting the Private Vault immediately zeroes `unlockedPrivateKey`, discards cached bitmaps from `ViewerImageCache`, and purges transient decrypted preview files.
+
 ## Key transitions
 
 | Transition | Mechanism | Nonce / IV | Authentication |
@@ -200,5 +208,4 @@ See [ADR-0005](adr/ADR-0005-recovery-envelope-and-key-rotation.md).
 * **The Keystore key can be used by the application.** Anything that runs
   inside the application process can ask the Keystore to unwrap the VMK.
   Malware with the app's UID defeats this protection entirely.
-* **No key rotation.** There is no mechanism to re-wrap the VMK under a new
-  Keystore key or to re-encrypt objects with a new DEK. Both are future work.
+* **Key rotation.** Master key rotation (rotateVaultMasterKey), object re-encryption under fresh DEKs (reencryptObject), and Android Keystore hardware re-wrapping are fully supported and exposed in Settings.
