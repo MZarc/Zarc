@@ -1,156 +1,236 @@
 <div align="center">
 
-# Zarc
+<img src="icon.png" width="128" height="128" style="border-radius: 28px; box-shadow: 0 8px 24px rgba(0,0,0,0.6);" alt="Zarc Vault Icon" />
 
-### The Zero-Knowledge Encrypted Media Vault for Android
+# ZARC
+### The Zero-Knowledge Hardware-Backed Encrypted Photo & Video Vault
 
-**An uncompromising, high-security encrypted vault engineered with a dark, One UI inspired aesthetic.**  
-*Native Rust cryptographic core · libsodium authenticated streaming AEAD · Android Keystore Hardware Backed · Jetpack Compose*
+**A uncompromising, high-security offline media gallery and disguised container engine for Android.**  
+*Native Rust cryptographic core · libsodium streaming AEAD · Android Keystore StrongBox · Hallmark OLED Design*
 
-[![Platform](https://img.shields.io/badge/platform-Android%2024%2B-3DDC84?logo=android&logoColor=white)](#requirements)
-[![Core](https://img.shields.io/badge/core-Rust%201.93.1-000000?logo=rust)](#architecture)
-[![UI](https://img.shields.io/badge/UI-Jetpack%20Compose-4285F4?logo=jetpackcompose&logoColor=white)](#the-experience)
-[![Crypto](https://img.shields.io/badge/crypto-XChaCha20--Poly1305-6f42c1)](#cryptography)
-[![Version](https://img.shields.io/badge/version-v1.0.0-blue)](#project-status)
-[![License](https://img.shields.io/badge/license-Apache--2.0-green)](LICENSE)
+[![Platform](https://img.shields.io/badge/Platform-Android%2024%2B-3DDC84?logo=android&logoColor=white)](#prerequisites)
+[![Core](https://img.shields.io/badge/Core-Rust%201.93.1-000000?logo=rust)](#native-security-core)
+[![UI](https://img.shields.io/badge/UI-Jetpack%20Compose-4285F4?logo=jetpackcompose&logoColor=white)](#hallmark-design-system)
+[![Crypto](https://img.shields.io/badge/Crypto-XChaCha20--Poly1305-6f42c1)](#cryptographic-architecture)
+[![KDF](https://img.shields.io/badge/KDF-Argon2id-critical)](#project-zarc--disguised-polyglot-photo-archives-albumjpg)
+[![Network](https://img.shields.io/badge/Network-0%25%20Offline%20(Air--Gapped)-success)](#1-zero-cleartext-at-rest--strict-air-gap)
+[![License](https://img.shields.io/badge/License-Apache--2.0-blue)](LICENSE)
 
-[Why It Is Not a Normal Gallery](#this-is-not-a-normal-gallery) · [Security & Architecture](#security-model) · [Key Features](#features-at-a-glance) · [Build & Verify](#build-from-source) · [Developer](#developer--credits)
+[Why Zarc Differs](#-why-zarc-is-not-a-normal-gallery) • [Feature Tour](#-features-in-depth) • [Disguised Archives](#-project-zarc--disguised-polyglot-photo-archives-albumjpg) • [Format Support](#-supported-media-formats-honest-breakdown) • [Security Model](#-cryptographic-architecture) • [Building](#-building-and-verification) • [Author](#-developer--credits)
 
 </div>
 
 ---
 
-## ⚠️ THIS IS NOT A NORMAL PHONE GALLERY
+## ⚠️ Why Zarc is NOT a Normal Gallery
 
-> [!IMPORTANT]  
-> **Zarc is NOT an ordinary photo viewer or stock Android camera roll app.**  
-> It does not scan your filesystem, it does not index your DCIM folder, and it never leaves your precious media sitting unencrypted on your disk.
+> [!IMPORTANT]
+> **Zarc is fundamentally not an ordinary photo gallery or camera-roll viewer.**  
+> It does not scan your filesystem, it does not index your `DCIM/` folder, and it **never** leaves unencrypted media on flash memory.
 
-Ordinary phone galleries and so-called "vault" or "secret locker" apps usually just hide plaintext files behind a PIN lock, rename file extensions (e.g. from `.jpg` to `.bin`), or hide folders inside `.nomedia` directories. If the device is connected to a computer via USB, backed up via ADB, or scanned with a file manager, all files remain completely visible as unencrypted plaintext.
+Virtually all Play Store "photo vault" or "secret locker" apps rely on **security theater**:
+- They rename `.jpg` to `.bin` or place a `.nomedia` file inside a hidden folder.
+- They render a password screen, but leave raw image bytes sitting unencrypted on storage.
+- Plugging the phone into a PC via USB, pulling files with ADB, or opening a basic file explorer exposes every single image and video in plaintext.
 
-### How Zarc Differs Radically:
+### How Zarc Operates Differently:
 
-1. **Zero Cleartext at Rest (Cryptographic Sealing)**:
-   - When media is imported into Zarc, it is transformed into an authenticated, opaque binary container encrypted with **XChaCha20-Poly1305** using a unique per-object Data Encryption Key (DEK).
-   - Filenames, capture dates, dimensions, video duration, thumbnails, and directory structures are completely sealed inside an encrypted catalog (`index.bin`). The storage directory contains only random hexadecimal UUID hashes.
-2. **Protected from System & Cleaner Utilities**:
-   - Vault files are stored strictly in Android's `Context.noBackupFilesDir`.
-   - Aggressive OEM cache cleaners, "storage boosters", and junk cleanup tools cannot delete, clear, or touch your vault media.
-   - Automatically excluded from cloud backups and OS-level device syncs to prevent remote leakage.
-3. **100% Offline with Zero Network Permissions**:
-   - `AndroidManifest.xml` declares **NO `android.permission.INTERNET`**.
-   - The application has zero capability to transmit analytics, telemetry, crash dumps, or vault blobs over the network. It is entirely air-gapped.
+1. **Zero Cleartext at Rest (Authenticated Cryptographic Sealing)**:
+   - When media is imported into Zarc, it is encrypted using **XChaCha20-Poly1305** authenticated streaming AEAD with a fresh 256-bit per-object Data Encryption Key (DEK).
+   - Filenames, capture dates, dimensions, video duration, and thumbnails are sealed inside an encrypted catalog (`index.bin`). The disk contains only random hexadecimal UUID blobs.
+2. **Immune to OEM "Cleaners" & Junk Boosters**:
+   - Media resides strictly in Android's `Context.noBackupFilesDir`.
+   - OEM junk cleaners, storage optimizers, and automated cleanup tools cannot reach, delete, or alter vault media.
+   - Automatically excluded from cloud backups and OS-level device transfers to prevent remote exfiltration.
+3. **100% Air-Gapped (Zero Network Permissions)**:
+   - `AndroidManifest.xml` **omits `android.permission.INTERNET`**.
+   - The app possesses zero network sockets or APIs. It is physically incapable of transmitting telemetry, crash logs, or analytics.
 4. **Hardware-Backed Keystore Isolation**:
-   - Keys are rooted in Android's Trusted Execution Environment (TEE) / StrongBox keystore (`KeyProperties.PURPOSE_ENCRYPT | KeyProperties.PURPOSE_DECRYPT`).
-   - Private key material never leaves isolated hardware keystore modules.
+   - Master envelope keys are rooted in Android's **Trusted Execution Environment (TEE)** or **StrongBox** hardware module (`KeyProperties.PURPOSE_ENCRYPT | KeyProperties.PURPOSE_DECRYPT`).
+   - Private key material never leaves isolated hardware keystore silicon.
 5. **Fail-Closed Cryptographic Invariants**:
-   - Any modification, truncation, bit-flip, reordering, or substitution of an encrypted block causes an immediate Poly1305 authentication failure. Nothing is ever decoded on a "best-effort" basis.
+   - Any modification, truncation, bit-flip, reordering, or substitution of an encrypted block causes an immediate Poly1305 authentication failure. Nothing is ever loaded on a "best-effort" basis.
 
 ---
 
-## Features at a Glance
+## 🌟 Features in Depth
 
 ### 1. High-Performance Encrypted Roll
-- **Optimized for 10,000+ Items**: Paginated memory windowing and cached sealed thumbnails ensure fluid, buttery-smooth 120Hz scrolling even across massive photo archives.
-- **Dynamic 2–6 Column Grid**: Pinch-to-zoom in and out of the grid smoothly, or pick your layout directly. Defaults to a clean 4-column layout.
-- **Date Separation & Sticky Overlay**: Clear chronological date separation headers with a hovering date pill during fast scroll.
-- **Fast Scrollbar**: Precision thumb tracking mapped 1:1 to library timeline without jitter or jumpiness.
-- **Batch Multi-Select Mode**: Intuitive round checkmarks on headers, date groupings, and individual items. Multi-select bottom action bar with high-contrast accessibility (Favorite, Delete, and More sheet).
+- **Engineered for 10,000+ Items**: Paginated memory windowing with LRU thumbnail caching ensures fluid 120Hz rendering across large libraries without OOM risks.
+- **Buttery-Smooth Fast Scrollbar**: Custom precision thumb tracker mapped 1:1 to the library timeline, completely eliminating jitter and lag.
+- **Dynamic 2–6 Column Grid**: Responsive pinch-to-zoom layout transitions seamlessly between 2 and 6 columns (defaults to a balanced 4-column grid).
+- **Chronological Date Groupings**: Sticky date headers and floating timestamp pills keep timelines structured.
+- **Batch Multi-Select Mode**: Header-level and item-level selection checkmarks paired with a high-contrast bottom action bar (Favorite, Delete, More).
 
-### 2. Deep Media Viewer & Independent Split View
-- **Gesture Zoom & Video Player**: Pinch-to-zoom (1×–6×), double-tap snap, and integrated `androidx.media3` video player.
-- **Filmstrip Mini-Roll**: Interactive horizontal filmstrip tile bar at the bottom for quick thumbnail browsing.
-- **Dual-Pane Split Viewer**: Compare two photos or videos simultaneously with independent mini-rolls and full zoom/pan capabilities on both panes.
-- **Full Metadata & Info Modal**: Clean inspection dialog displaying file name, resolution, uncompressed size, capture timestamp, MIME format, and hardware encryption parameters with zero awkward text truncation.
+### 2. Media Viewer & Dual-Pane Split View
+- **Gesture Zoom & Video Player**: Pinch-to-zoom (1×–6×), double-tap snap, and integrated hardware-accelerated video playback.
+- **Interactive Bottom Filmstrip**: Quick horizontal thumbnail carousel for effortless sequential browsing.
+- **Dual-Pane Split Screen**: Compare two photos or videos side-by-side with independent pan, zoom, and thumbnail selectors.
+- **Zero-Truncation Details Modal**: Hairline-bordered technical inspector displaying file name, resolution, uncompressed size, capture timestamp, MIME format, and hardware encryption parameters.
 
-### 3. Hidden Biometric & Stealth Private Vault
-- **Zero Evidence Private Area**: Hidden from top bars, menus, and settings. Accessed exclusively via an intentional **long-press on the top-left header** (`Roll` / `Photos` / `Videos`).
-- **Hardware Biometric Lock**: Protected behind Android BiometricPrompt (Fingerprint / Face / Hardware Credential).
-- **Time-Based Stealth PIN Protection**: Optional double-protection layer requiring a dynamic reversed time PIN (e.g., at `14:05`, the stealth PIN is `0541`).
-- **Write Without Pre-Unlock**: Move items into the Private Vault seamlessly from anywhere without unlocking first.
-- **Auto-Locking Lifecycle**: Leaving the private view immediately zeros the private subkey in memory, purging temporary caches and decrypted memory bitmaps.
-- **Isolated Private Recycle Bin**: Dedicated encrypted trash bin for private media with independent 30-day auto-purge countdowns.
+### 3. Concealed Biometric & Stealth Private Vault
+- **Zero-Trace Entry**: Hidden from all navigation bars, menus, and drawers. Accessible solely via an intentional **long-press on the top-left header** (`Roll` / `Photos` / `Videos`).
+- **Hardware Biometric Gate**: Gated behind Android `BiometricPrompt` (Fingerprint, Face, Hardware Lockscreen Credential).
+- **Dynamic Time-Based Stealth PIN**: Optional secondary gate requiring a dynamic mathematical time PIN:
+  $$\text{PIN} = \text{Current Minute } (MM) + \text{Reversed 24h Hour } (\text{rev}(HH))$$
+  *(For example: at 13:17, Minute is `17`, Hour is `13` $\rightarrow$ reversed `31`, producing PIN `1731`)*.
+- **Write Without Pre-Unlock**: Move media into the Private Vault directly from any selection without requiring authentication upfront.
+- **Auto-Locking Lifecycle**: Navigating away from the private screen immediately zeros the private subkey in memory, purging temporary caches and decrypted bitmaps.
+- **Dedicated Private Recycle Bin**: Independent encrypted retention bin with 30-day auto-purge countdowns.
 
-### 4. Real 30-Day Auto-Purge Recycle Bin
-- **True Expiration Countdown**: Soft-deleted files display remaining days left (`29d left`, `today`, etc.).
-- **Automatic Purge**: Upon entering the bin, items older than 30 days are permanently shredded from disk.
-- **Interactive Bin Viewer**: Preview deleted media full-screen, restore with a tap, or permanently destroy with explicit confirmation modals.
+### 4. 30-Day Auto-Purge Recycle Bin
+- **Retention Countdown Badges**: Soft-deleted files show remaining retention days (`29d left`, `today`, etc.).
+- **Automatic Permanent Shredding**: Media older than 30 days is automatically purged and overwritten on disk.
+- **Interactive Bin Viewer**: Preview deleted media full-screen, restore with a tap, or destroy permanently with confirmation dialogs.
 
-### 5. Custom Typography & Haptics
-- **Andika Typography**: Clean, legible, and elegant Google Fonts Andika typography bundled 100% offline.
-- **Tactile Vibration Haptics**: Subtle physical vibration responses across navigation taps, long presses, multi-select toggles, and viewer swipe actions.
+### 5. Hallmark Design System & Offline Typography
+- **Hallmark Floor Discipline**: Free of AI templates, purple-to-blue gradients, cards-in-cards, and emojis as UI icons.
+- **OLED Midnight Surface Ladder**: 4-tier dark surface foundation (`0xFF07080A` to `0xFF262B3A`) paired with a restrained cobalt accent (`0xFF4CA5FF`).
+- **Concentric Radii & Tactile Hairlines**: 1dp `outlineVariant` borders establish clean elevation boundaries.
+- **Offline Andika Typography**: Bundled Google Fonts Andika typography rendered completely offline.
+- **Haptic Feedback**: Subtle vibration cues for navigation, selection toggles, long presses, and viewer gestures.
 
 ---
 
-## Security Model
+## 🗃️ PROJECT ZARC — Disguised Polyglot Photo Archives (`Album.jpg`)
+
+Zarc features a dedicated custom archive system that disguises encrypted photo collections as genuine JPEG photos:
+
+```text
+DISGUISED ZARC CONTAINER (Album.jpg)
+┌────────────────────────────────────────────────────────────┐
+│ 1. Genuine Metadata-Sanitised JPEG Cover Photo             │
+│    SOI (0xFF, 0xD8) ─── Compressed Scan Data ─── (0xFF, 0xD9)│
+├────────────────────────────────────────────────────────────┤
+│ 2. Appended Custom ZARC Binary Container Payload          │
+│    • Fixed Public Header (Magic: 'ZARC', Version, Flags)   │
+│    • Random Container ID & Argon2id Salt                   │
+│    • Key-Wrapping Nonce & Encrypted Content DEK            │
+│    • Encrypted Content Objects (Sanitised Photos 1..N)     │
+│    • Encrypted Manifest (Filenames, Dimensions, MediaTypes)│
+├────────────────────────────────────────────────────────────┤
+│ 3. 32-Byte Fixed-Length Trailer & Locator (O(1) Seek)      │
+│    [Payload Offset (u64)] [Payload Len (u64)]              │
+│    [Header Len (u32)] [Version (u16)] [Flags (u16)]        │
+│    [Magic: 'ZARC' (4 bytes)]                               │
+└────────────────────────────────────────────────────────────┘
+```
+
+### Key Technical Properties:
+1. **Outer Disguise Compatibility**:
+   - The file begins with a valid JPEG header (`0xFF, 0xD8`) and ends its image stream with standard JPEG EOI (`0xFF, 0xD9`).
+   - Stock Android gallery apps, Google Photos, WhatsApp file senders, and desktop image viewers open and display the cover photo normally.
+2. **Metadata Sanitization in Rust**:
+   - Prior to packaging, all images (JPEG, PNG, WebP) are stripped of EXIF, GPS location, camera serial numbers, IPTC, and XMP metadata at the byte level in native Rust without generational loss.
+3. **Argon2id + XChaCha20-Poly1305 Security**:
+   - Encryption keys are derived using **Argon2id** (memory-hard, GPU/ASIC-resistant).
+   - Filenames, dimensions, media types, and photo payloads remain 100% ciphertext until unlocked with the correct passphrase.
+4. **Deterministic $O(1)$ Locator**:
+   - The extractor seeks directly to the last 32 bytes of the file, verifies the trailer magic, and jumps directly to the encrypted payload without fragile or slow byte-scanning.
+5. **In-App Inspection & Extraction**:
+   - Opening `Album.jpg` immediately displays the outer cover with zero password required.
+   - Supplying the passphrase authenticates the container and unlocks an interactive browser allowing single-photo inspection or bulk extraction to user-selected device folders via the Storage Access Framework (SAF).
+
+---
+
+## 🔍 Supported Media Formats (Honest Breakdown)
+
+Zarc does not claim to support "literally all" media formats. It is specifically built for common mobile photos and videos:
+
+| Context | Supported Formats | Unsupported / Intentionally Omitted |
+| :--- | :--- | :--- |
+| **Main Vault Photos** | **JPEG** (`.jpg`, `.jpeg`), **PNG** (`.png`), **WebP** (`.webp`), **HEIC** (`.heic`), **GIF** (`.gif`, first frame), **BMP** | Camera RAW (`.dng`, `.cr2`, `.nef`, `.arw`), TIFF, SVG vectors, PSD, AVIF (< API 31) |
+| **Main Vault Videos** | **MP4** (`.mp4`), **MKV** (`.mkv`), **MOV** (`.mov`), **WebM** (`.webm`), **3GP** (`.3gp`) | AVI, WMV, FLV, TS, ProRes, or codecs without hardware decoders on the device |
+| **Disguised Archive Cover** | **JPEG only** (`0xFFD8` ... `0xFFD9`) | PNG, WebP, GIF, HEIC cannot serve as the outer disguise carrier |
+| **Disguised Archive Content** | **JPEG**, **PNG**, **WebP** | Formats without byte-level metadata parsers are rejected to prevent location/privacy leaks |
+
+---
+
+## 🔒 Cryptographic Architecture
 
 ```mermaid
 flowchart TD
-    KEK["AES-256-GCM Keystore Key<br/>Android Keystore · Non-exportable<br/>Hardware-backed (TEE / StrongBox)"]
-    VMK["Vault Master Key (VMK)<br/>256-bit CSPRNG · In-memory only · Wrapped at rest"]
-    PVK["Private Vault Subkey<br/>Derived via HKDF / BLAKE2b subkey · Biometric Gate"]
-    DEK["Per-Object Data Encryption Key (DEK)<br/>256-bit · Fresh for every single file"]
-    OBJ["Encrypted Container<br/>XChaCha20-Poly1305 authenticated stream"]
+    subgraph Hardware Keystore ["Hardware Security Module (TEE / StrongBox)"]
+        KEK["AES-256-GCM Master Key<br/>Non-exportable · Keymaster 4.0+"]
+    end
 
-    KEK -->|"Wraps / Unwraps"| VMK
-    VMK -->|"Derives / Unlocks"| PVK
-    VMK -->|"Wraps"| DEK
-    PVK -->|"Wraps private objects"| DEK
-    DEK -->|"Encrypts"| OBJ
+    subgraph Memory ["Ephemeral Volatile Memory"]
+        VMK["Vault Master Key (VMK)<br/>256-bit CSPRNG · Ephemeral · Zeroized on Lock"]
+        PVK["Private Vault Subkey<br/>Derived via HKDF / BLAKE2b · Gated by Biometrics"]
+        DEK["Per-Object DEK<br/>256-bit Key per Photo/Video"]
+    end
+
+    subgraph Storage ["Encrypted Storage (noBackupFilesDir)"]
+        INDEX["Encrypted Catalog (index.bin)<br/>XChaCha20-Poly1305 · Filenames & Dates"]
+        BLOB["Encrypted Object Blobs<br/>Streaming AEAD · 64 KB Chunks · UUIDs"]
+    end
+
+    KEK -->|"Unwraps at launch"| VMK
+    VMK -->|"Derives with Biometric Prompt"| PVK
+    VMK -->|"Encrypts index"| INDEX
+    VMK -->|"Wraps DEK (Standard)"| DEK
+    PVK -->|"Wraps DEK (Private)"| DEK
+    DEK -->|"Encrypts stream"| BLOB
 ```
 
-| Security Dimension | Technical Implementation |
-|---|---|
-| **Cipher at Rest** | `crypto_secretstream_xchacha20poly1305` (Streaming AEAD, bounded 64 KB memory chunks) |
-| **Integrity & Authenticity** | Per-chunk Poly1305 MAC tags with authenticated `TAG_FINAL` headers |
-| **Key Hierarchy** | Rooted in Android Keystore AES-256-GCM. VMK unwrapped only into ephemeral memory |
-| **Private Vault Isolation** | Authenticated subkey derivation (`zarc.private.v1`) wrapped with Keystore biometric auth |
-| **Disaster Recovery** | Optional Argon2id + XChaCha20-Poly1305 passphrase envelope for recovery across devices |
-| **Key Zeroization** | Rust `Zeroize` and JVM explicit memory wipes upon lock or backgrounding |
-| **Network Exposure** | Absolutely zero network access (`INTERNET` permission omitted) |
+### Cryptographic Parameters
+
+| Dimension | Specification |
+| :--- | :--- |
+| **Symmetric Cipher** | `crypto_secretstream_xchacha20poly1305` (IETF draft, 192-bit nonce, 256-bit key) |
+| **Chunking & Streaming** | 64 KiB chunks with incremental Poly1305 MAC tags (`TAG_MESSAGE` / `TAG_FINAL`) |
+| **Key Wrapping** | `crypto_aead_xchacha20poly1305_ietf` with authenticated contextual AAD |
+| **Archive KDF** | **Argon2id** (`m_cost`: 64 MiB, `t_cost`: 3 passes, `p_cost`: 4 lanes) |
+| **Subkey Derivation** | BLAKE2b-based subkey derivation (`zarc.private.v1`) |
+| **Memory Sanitization** | Automatic memory zeroization via Rust `zeroize` crate and JVM explicit sweeps |
 
 ---
 
-## Architecture & Codebase Structure
+## 🏗️ Repository Architecture
 
-```
+```text
 zarc/
 ├── android/                         # Android Studio Gradle Project
 │   ├── app/src/main/
-│   │   ├── AndroidManifest.xml      # Zero-permission security manifest
-│   │   ├── res/font/                # Offline Andika typography fonts
+│   │   ├── AndroidManifest.xml      # Zero-permission air-gapped manifest
+│   │   ├── res/font/                # Offline Andika typography
 │   │   └── java/com/zarc/vault/
-│   │       ├── core/                # JNI bindings, native wrapper, vault repository
-│   │       ├── gallery/             # Gallery repository, index serialization, private gate
-│   │       ├── keystore/            # Hardware Keystore key manager & TEE reporting
-│   │       └── ui/                  # Jetpack Compose UI (Screens, Viewer, Info, Theme, Haptics)
+│   │       ├── archive/             # Disguised .jpg & .zarc repository & extraction
+│   │       ├── core/                # JNI bindings, native bridge, vault repository
+│   │       ├── gallery/             # Gallery state, index serialization, private gate
+│   │       ├── keystore/            # StrongBox / TEE key manager
+│   │       └── ui/                  # Compose UI (Screens, Viewer, Info, Theme, Haptics)
 ├── crates/
-│   ├── zarc-core/                   # High-performance Rust cryptographic engine
-│   │   ├── src/container.rs         # Versioned 152-byte opaque header parser & validator
-│   │   ├── src/vault.rs             # Transactional, atomic, fsync write pipeline
-│   │   ├── src/keywrap.rs           # VMK / DEK hierarchical key wrapping
-│   │   └── src/sodium/              # Vendored libsodium FFI bridge
-│   └── zarc-jni/                    # Rust JNI bindings for Android
-├── third_party/libsodium/           # Vendored libsodium 1.0.22 with cryptographic signature check
-├── tools/                           # Automated build, verification, and device audit scripts
-└── docs/                            # In-depth security specifications & architectural ADRs
+│   ├── zarc-core/                   # Pure Rust cryptographic engine
+│   │   ├── src/archive/             # Custom container format, Argon2id & metadata sanitizer
+│   │   ├── src/container.rs         # 152-byte header parser and validator
+│   │   ├── src/vault.rs             # Atomic, fsync write pipeline
+│   │   ├── src/keywrap.rs           # VMK / DEK key wrapping
+│   │   └── src/sodium/              # Vendored libsodium FFI bindings
+│   └── zarc-jni/                    # JNI bridge exposing C-ABI to Kotlin
+├── third_party/libsodium/           # Vendored libsodium 1.0.22 with SHA-256 verification
+├── tools/                           # PowerShell build & deployment automation scripts
+└── docs/                            # FORMAT_SPEC.md & technical security documentation
 ```
 
 ---
 
-## Requirements & Building from Source
+## 🛠️ Building and Verification
 
 ### Prerequisites
-- **Android SDK**: API Platform 36 (minSdk 24)
-- **Android NDK**: Version 27.1+
-- **Rust**: 1.93.1 (`rustup target add aarch64-linux-android armv7-linux-androideabi i686-linux-android x86_64-linux-android`)
+- **Android SDK**: API 36 Platform (minimum SDK 24)
+- **Android NDK**: Version 27.1+ (`android-ndk-r27c` recommended)
+- **Rust**: 1.85+ stable with target toolchains:
+  ```bash
+  rustup target add aarch64-linux-android armv7-linux-androideabi i686-linux-android x86_64-linux-android
+  ```
 - **JDK**: OpenJDK 21
 - **Gradle**: 9.6.1 (wrapper included)
 
 ### Build Commands
 
 ```powershell
-# 1. Compile the native Rust core for all ABIs (arm64-v8a, armeabi-v7a, x86, x86_64)
+# 1. Compile native Rust cryptographic libraries for all Android ABIs
 powershell -NoProfile -ExecutionPolicy Bypass -File tools\build-android.ps1
 
 # 2. Compile and package the debug APK
@@ -161,18 +241,28 @@ cd android
 adb install -r app\build\outputs\apk\debug\app-debug.apk
 ```
 
+### Running Native & Integration Tests
+
+```bash
+# Execute Rust unit, property, and format roundtrip tests
+cargo test --workspace
+
+# Execute custom archive format and metadata sanitization tests
+cargo test -p zarc-core --test archive_test
+```
+
 ---
 
-## Developer & Credits
+## 👨‍💻 Developer & Credits
 
 - **Developer**: Meet Mistry
 - **Email**: [meetzarc@gmail.com](mailto:meetzarc@gmail.com)
-- **Website**: [https://meetmistry.vercel.app](https://meetmistry.vercel.app)
-- **GitHub**: [github.com/MZarc](https://github.com/MZarc)
+- **Portfolio / Website**: [https://meetmistry.vercel.app](https://meetmistry.vercel.app)
+- **GitHub**: [@MZarc](https://github.com/MZarc)
 
 ---
 
-## License
+## 📄 License
 
 This project is licensed under the **Apache License 2.0** — see the [LICENSE](LICENSE) file for details.  
-Vendored **libsodium** is subject to the ISC license.
+Vendored **libsodium** is distributed under the ISC License.

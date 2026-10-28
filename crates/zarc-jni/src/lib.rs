@@ -15,11 +15,12 @@
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
 
-use jni::objects::{JByteArray, JClass, JString};
-use jni::sys::{jboolean, jbyteArray, jint, jstring};
+use jni::objects::{JByteArray, JClass, JObjectArray, JString};
+use jni::sys::{jboolean, jbyteArray, jint, jobjectArray, jstring};
 use jni::JNIEnv;
 use zeroize::Zeroize;
 
+use zarc_core::archive::{self, ArchiveInputFile};
 use zarc_core::container::ObjectId;
 use zarc_core::keywrap::VaultMasterKey;
 use zarc_core::recovery::{RecoveryEnvelope, RecoveryWitness};
@@ -379,6 +380,209 @@ pub extern "system" fn Java_com_zarc_vault_core_ZarcNative_nativeDeriveSubkey(
             .map_err(|e| e.to_string())
     }));
     finish_bytes(&mut env, result)
+}
+
+/// Package multiple photos into an encrypted `.zarc` or polyglot `.jpg` container.
+#[no_mangle]
+pub extern "system" fn Java_com_zarc_vault_core_ZarcNative_nativeArchiveCreate(
+    mut env: JNIEnv,
+    _class: JClass,
+    archive_path: JString,
+    source_paths: jobjectArray,
+    display_names: jobjectArray,
+    cover_index: jint,
+    passphrase: JByteArray,
+    outer_cover_jpeg: JByteArray,
+) -> jstring {
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let out_path = read_path(&mut env, &archive_path)?;
+        let mut pass_bytes = read_key(&mut env, &passphrase)?;
+
+        let cover_bytes = if outer_cover_jpeg.as_raw().is_null() {
+            None
+        } else {
+            let bytes = read_key(&mut env, &outer_cover_jpeg)?;
+            if bytes.is_empty() {
+                None
+            } else {
+                Some(bytes)
+            }
+        };
+
+        let sp_obj = unsafe { JObjectArray::from_raw(source_paths) };
+        let dn_obj = unsafe { JObjectArray::from_raw(display_names) };
+
+        let num_files = env.get_array_length(&sp_obj).map_err(|e| format!("JNI source_paths length: {e}"))?;
+        let num_names = env.get_array_length(&dn_obj).map_err(|e| format!("JNI display_names length: {e}"))?;
+        if num_files != num_names {
+            return Err("source_paths and display_names length mismatch".into());
+        }
+
+        let mut inputs = Vec::with_capacity(num_files as usize);
+        for i in 0..num_files {
+            let p_elem = env.get_object_array_element(&sp_obj, i).map_err(|e| format!("JNI get elem {i}: {e}"))?;
+            let d_elem = env.get_object_array_element(&dn_obj, i).map_err(|e| format!("JNI get elem {i}: {e}"))?;
+            let p_str: JString = p_elem.into();
+            let d_str: JString = d_elem.into();
+            let path = read_path(&mut env, &p_str)?;
+            let display_name = read_string(&mut env, &d_str)?;
+
+            inputs.push(ArchiveInputFile {
+                path,
+                display_name,
+                is_cover: i == cover_index,
+            });
+        }
+
+        let res = archive::create_archive(
+            &out_path,
+            cover_bytes.as_deref(),
+            &inputs,
+            &pass_bytes,
+            3,
+            64 * 1024,
+            None::<fn(f32, &str)>,
+        );
+        pass_bytes.zeroize();
+        res?;
+
+        Ok::<String, String>(out_path.to_string_lossy().into_owned())
+    }));
+    finish(&mut env, result)
+}
+
+/// Read the unencrypted outer cover JPEG from a polyglot archive without password.
+#[no_mangle]
+pub extern "system" fn Java_com_zarc_vault_core_ZarcNative_nativeArchiveReadOuterCover(
+    mut env: JNIEnv,
+    _class: JClass,
+    archive_path: JString,
+) -> jbyteArray {
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let path = read_path(&mut env, &archive_path)?;
+        let maybe_cover = archive::read_outer_cover_jpeg(&path)?;
+        match maybe_cover {
+            Some(bytes) => {
+                let array = env
+                    .byte_array_from_slice(&bytes)
+                    .map_err(|e| format!("JNI byte array conversion: {e}"))?;
+                Ok(array.into_raw())
+            }
+            None => Ok(std::ptr::null_mut()),
+        }
+    }));
+    finish_bytes(&mut env, result)
+}
+
+/// Unlock a `.zarc` archive and return the encrypted manifest as JSON.
+#[no_mangle]
+pub extern "system" fn Java_com_zarc_vault_core_ZarcNative_nativeArchiveReadManifest(
+    mut env: JNIEnv,
+    _class: JClass,
+    archive_path: JString,
+    passphrase: JByteArray,
+) -> jstring {
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let path = read_path(&mut env, &archive_path)?;
+        let mut pass_bytes = read_key(&mut env, &passphrase)?;
+
+        let unlocked = archive::unlock_archive(&path, &pass_bytes);
+        pass_bytes.zeroize();
+        let unlocked = unlocked?;
+
+        let json = serde_json::to_string(&unlocked.manifest)
+            .map_err(|e| format!("Failed to serialize manifest to JSON: {e}"))?;
+
+        Ok::<String, String>(json)
+    }));
+    finish(&mut env, result)
+}
+
+/// Extract a single photo from a `.zarc` archive to a destination file.
+#[no_mangle]
+pub extern "system" fn Java_com_zarc_vault_core_ZarcNative_nativeArchiveExtractEntry(
+    mut env: JNIEnv,
+    _class: JClass,
+    archive_path: JString,
+    passphrase: JByteArray,
+    object_id: JString,
+    destination_path: JString,
+) -> jstring {
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let path = read_path(&mut env, &archive_path)?;
+        let dest = read_path(&mut env, &destination_path)?;
+        let obj_id = read_string(&mut env, &object_id)?;
+        let mut pass_bytes = read_key(&mut env, &passphrase)?;
+
+        let unlocked = archive::unlock_archive(&path, &pass_bytes);
+        pass_bytes.zeroize();
+        let unlocked = unlocked?;
+
+        archive::extract_object_to_file(&unlocked, &obj_id, &dest)?;
+
+        Ok::<String, String>(dest.to_string_lossy().into_owned())
+    }));
+    finish(&mut env, result)
+}
+
+/// Extract all photos from a `.zarc` archive into a destination directory.
+#[no_mangle]
+pub extern "system" fn Java_com_zarc_vault_core_ZarcNative_nativeArchiveExtractAll(
+    mut env: JNIEnv,
+    _class: JClass,
+    archive_path: JString,
+    passphrase: JByteArray,
+    destination_dir: JString,
+) -> jstring {
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let path = read_path(&mut env, &archive_path)?;
+        let dest_dir = read_path(&mut env, &destination_dir)?;
+        let mut pass_bytes = read_key(&mut env, &passphrase)?;
+
+        let unlocked = archive::unlock_archive(&path, &pass_bytes);
+        pass_bytes.zeroize();
+        let unlocked = unlocked?;
+
+        let extracted = archive::extract_all_to_dir(&unlocked, &dest_dir, None::<fn(f32, &str)>)?;
+        let paths: Vec<String> = extracted.into_iter().map(|p| p.to_string_lossy().into_owned()).collect();
+        let json = serde_json::to_string(&paths)
+            .map_err(|e| format!("Failed to serialize paths to JSON: {e}"))?;
+
+        Ok::<String, String>(json)
+    }));
+    finish(&mut env, result)
+}
+
+/// Extract the designated cover image to a cache file for fast UI display.
+#[no_mangle]
+pub extern "system" fn Java_com_zarc_vault_core_ZarcNative_nativeArchiveExtractCoverThumbnail(
+    mut env: JNIEnv,
+    _class: JClass,
+    archive_path: JString,
+    passphrase: JByteArray,
+    cache_destination_file: JString,
+) -> jstring {
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let path = read_path(&mut env, &archive_path)?;
+        let cache_file = read_path(&mut env, &cache_destination_file)?;
+        let mut pass_bytes = read_key(&mut env, &passphrase)?;
+
+        let unlocked = archive::unlock_archive(&path, &pass_bytes);
+        pass_bytes.zeroize();
+        let unlocked = unlocked?;
+
+        let cover_id = unlocked
+            .manifest
+            .cover_object_id
+            .as_ref()
+            .or_else(|| unlocked.manifest.objects.first().map(|o| &o.id))
+            .ok_or_else(|| "No cover image available in archive".to_string())?;
+
+        archive::extract_object_to_file(&unlocked, cover_id, &cache_file)?;
+
+        Ok::<String, String>(cache_file.to_string_lossy().into_owned())
+    }));
+    finish(&mut env, result)
 }
 
 /// Turn a byte array result into a Java byte array.

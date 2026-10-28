@@ -96,4 +96,47 @@ object ZarcNative {
         objectId: String,
         objectsDir: String,
     ): String
+
+    /** Packages multiple photos into an encrypted `.zarc` or polyglot `.jpg` container. */
+    external fun nativeArchiveCreate(
+        archivePath: String,
+        sourcePaths: Array<String>,
+        displayNames: Array<String>,
+        coverIndex: Int,
+        passphrase: ByteArray,
+        outerCoverJpeg: ByteArray?,
+    ): String
+
+    /** Reads the unencrypted outer cover JPEG without password from a polyglot archive. */
+    external fun nativeArchiveReadOuterCover(
+        archivePath: String,
+    ): ByteArray?
+
+    /** Unlocks a `.zarc` archive and returns the decrypted manifest as JSON. */
+    external fun nativeArchiveReadManifest(
+        archivePath: String,
+        passphrase: ByteArray,
+    ): String
+
+    /** Extracts a single photo from a `.zarc` archive to [destinationPath]. */
+    external fun nativeArchiveExtractEntry(
+        archivePath: String,
+        passphrase: ByteArray,
+        objectId: String,
+        destinationPath: String,
+    ): String
+
+    /** Extracts all photos from a `.zarc` archive into [destinationDir]. */
+    external fun nativeArchiveExtractAll(
+        archivePath: String,
+        passphrase: ByteArray,
+        destinationDir: String,
+    ): String
+
+    /** Extracts the designated cover photo directly to [cacheDestinationFile]. */
+    external fun nativeArchiveExtractCoverThumbnail(
+        archivePath: String,
+        passphrase: ByteArray,
+        cacheDestinationFile: String,
+    ): String
 }

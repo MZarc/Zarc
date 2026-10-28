@@ -199,6 +199,7 @@ fun GalleryApp(
         tab == GalleryTab.ALBUMS -> "Albums"
         tab == GalleryTab.PRIVATE -> if (state.inPrivateBin) "Private Bin" else "Private"
         tab == GalleryTab.BIN -> "Bin"
+        tab == GalleryTab.ARCHIVE -> "Zarc Archive"
         else -> "Settings"
     }
     val subtitle = when {
@@ -212,9 +213,10 @@ fun GalleryApp(
             else -> "Protected by the device authentication"
         }
         tab == GalleryTab.BIN -> plural(state.binnedItems.size, "item")
+        tab == GalleryTab.ARCHIVE -> "Custom Containers"
         else -> "Vault, security and recovery"
     }
-    val selectableIds = when {
+    val selectableIds: List<String> = when {
         albumOpen -> state.albumItems.map { it.id }
         tab == GalleryTab.PHOTOS -> state.roll.map { it.id }
         tab == GalleryTab.PRIVATE -> if (state.inPrivateBin) state.privateBinnedItems.map { it.id } else state.privateItems.map { it.id }
@@ -255,7 +257,8 @@ fun GalleryApp(
                     .fillMaxSize()
                     .padding(padding),
             ) {
-                GalleryTopBar(
+                if (tab != GalleryTab.ARCHIVE) {
+                    GalleryTopBar(
                     title = title,
                     subtitle = subtitle,
                     selection = state.selection,
@@ -267,7 +270,7 @@ fun GalleryApp(
                         null
                     },
                     searchOpen = state.searchOpen,
-                    onToggleSearch = if (tab == GalleryTab.SETTINGS) null else viewModel::toggleSearch,
+                    onToggleSearch = if (tab == GalleryTab.SETTINGS || tab == GalleryTab.ARCHIVE) null else viewModel::toggleSearch,
                     query = state.query,
                     onQuery = viewModel::setQuery,
                     onBack = if (tab != GalleryTab.PHOTOS || state.albumId != null || (tab == GalleryTab.PRIVATE && state.inPrivateBin)) {
@@ -283,7 +286,8 @@ fun GalleryApp(
                     },
                     onMore = { optionsOpen = true },
                     onHeaderLongClick = if (tab == GalleryTab.PHOTOS) onUnlockPrivate else null,
-                )
+                    )
+                }
 
                 when (tab) {
                     GalleryTab.PHOTOS -> PhotosScreen(state, viewModel)
@@ -291,12 +295,13 @@ fun GalleryApp(
                     GalleryTab.PRIVATE -> PrivateScreen(state, viewModel, onUnlockPrivate)
                     GalleryTab.BIN -> BinScreen(state, viewModel)
                     GalleryTab.SETTINGS -> SettingsScreen(state, viewModel)
+                    GalleryTab.ARCHIVE -> ArchiveScreen(onBack = { viewModel.selectTab(GalleryTab.PHOTOS) })
                 }
             }
         }
 
         AnimatedVisibility(
-            visible = !state.selecting,
+            visible = !state.selecting && tab != GalleryTab.ARCHIVE,
             modifier = Modifier.align(Alignment.BottomCenter),
             enter = fadeIn() + slideInVertically { it },
             exit = fadeOut() + slideOutVertically { it },
@@ -336,7 +341,7 @@ fun GalleryApp(
         }
 
         AnimatedVisibility(
-            visible = (tab.isNavDestination || (tab == GalleryTab.PRIVATE && state.privateUnlocked)) && !state.selecting,
+            visible = (tab.isNavDestination || (tab == GalleryTab.PRIVATE && state.privateUnlocked)) && !state.selecting && tab != GalleryTab.ARCHIVE,
             modifier = Modifier
                 .align(Alignment.BottomEnd)
                 .navigationBarsPadding()
@@ -978,11 +983,7 @@ private fun ImportButton(onClick: () -> Unit, modifier: Modifier = Modifier) {
             .size(56.dp)
             .shadow(16.dp, CircleShape, ambientColor = Color.Black, spotColor = Color.Black)
             .clip(CircleShape)
-            .background(
-                Brush.linearGradient(
-                    listOf(Color(0xFF74C4FF), Color(0xFF2E7BF6)),
-                ),
-            )
+            .background(MaterialTheme.colorScheme.primary)
             .clickable(onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
@@ -1002,10 +1003,11 @@ fun PhotosScreen(state: GalleryUiState, viewModel: GalleryViewModel) {
         EmptyState(
             title = if (state.query.isEmpty()) "No photos yet" else "Nothing found",
             subtitle = if (state.query.isEmpty()) {
-                "Tap the import button to add a picture or a video."
+                "Tap the import button to protect pictures and videos."
             } else {
                 "No item matches \"${state.query}\"."
             },
+            icon = if (state.query.isEmpty()) ZarcIcons.Roll else ZarcIcons.Search,
         )
     } else {
         MediaGrid(
@@ -1526,10 +1528,11 @@ fun AlbumsScreen(state: GalleryUiState, viewModel: GalleryViewModel) {
             EmptyState(
                 title = if (state.query.isEmpty()) "This album is empty" else "Nothing found",
                 subtitle = if (state.query.isEmpty()) {
-                    "Add media to it with Edit > Move to album."
+                    "Add media to it with More > Move to album."
                 } else {
                     "No item matches \"${state.query}\"."
                 },
+                icon = ZarcIcons.Albums,
             )
         } else {
             MediaGrid(
@@ -1560,12 +1563,13 @@ fun AlbumsScreen(state: GalleryUiState, viewModel: GalleryViewModel) {
 
     if (albums.isEmpty()) {
         EmptyState(
-            title = if (needle.isEmpty()) "No albums" else "Nothing found",
+            title = if (needle.isEmpty()) "No albums yet" else "Nothing found",
             subtitle = if (needle.isEmpty()) {
                 "Create an album from the menu to group your media."
             } else {
                 "No album matches \"$needle\"."
             },
+            icon = ZarcIcons.Albums,
         )
     } else {
         val context = androidx.compose.ui.platform.LocalContext.current
@@ -1892,7 +1896,7 @@ fun PrivateScreen(
 
         state.inPrivateBin -> Column(Modifier.fillMaxSize()) {
             if (state.privateBinnedItems.isEmpty()) {
-                EmptyState("Private bin is empty", "Deleted private items stay here for 30 days before permanent deletion.")
+                EmptyState("Private bin is empty", "Deleted private items stay here for 30 days before permanent deletion.", icon = ZarcIcons.Bin)
             } else {
                 MediaGrid(
                     items = state.visiblePrivateBinnedItems,
@@ -1916,8 +1920,9 @@ fun PrivateScreen(
 
         state.privateItems.isEmpty() -> Column(Modifier.fillMaxSize()) {
             EmptyState(
-                "Private Vault is empty",
-                "Tap the import button below to securely store confidential media.",
+                title = "Private vault is empty",
+                subtitle = "Confidential photos moved here are secured behind hardware biometrics.",
+                icon = ZarcIcons.Shield,
             )
         }
 
@@ -1947,7 +1952,7 @@ fun PrivateScreen(
 @Composable
 fun BinScreen(state: GalleryUiState, viewModel: GalleryViewModel) {
     if (state.binnedItems.isEmpty()) {
-        EmptyState("The bin is empty", "Deleted items stay here for 30 days before being permanently deleted.")
+        EmptyState("Recycle bin is clean", "Deleted items stay here for 30 days before being permanently deleted.", icon = ZarcIcons.Bin)
     } else {
         MediaGrid(
             items = state.visibleBinnedItems,
@@ -1969,23 +1974,51 @@ fun BinScreen(state: GalleryUiState, viewModel: GalleryViewModel) {
     }
 }
 
-/** The empty state of a screen. */
+/** Hallmark-crafted empty state: contextual icon in circular surface, clear headline and explanation. */
 @Composable
-private fun EmptyState(title: String, subtitle: String) {
+private fun EmptyState(
+    title: String,
+    subtitle: String,
+    icon: ImageVector? = null,
+) {
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(start = 32.dp, end = 32.dp, top = 32.dp, bottom = FloatingBarRoom),
+            .padding(horizontal = 32.dp)
+            .padding(bottom = FloatingBarRoom),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center,
     ) {
-        Text(title, style = MaterialTheme.typography.titleMedium)
+        if (icon != null) {
+            Box(
+                modifier = Modifier
+                    .size(64.dp)
+                    .clip(CircleShape)
+                    .background(MaterialTheme.colorScheme.surfaceContainerHigh)
+                    .border(BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant), CircleShape),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = icon,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(30.dp),
+                )
+            }
+            Spacer(Modifier.height(18.dp))
+        }
+        Text(
+            text = title,
+            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold),
+            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+        )
         Spacer(Modifier.height(8.dp))
         Text(
             text = subtitle,
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+            modifier = Modifier.widthIn(max = 300.dp),
         )
     }
 }
@@ -2220,6 +2253,9 @@ private fun OptionsSheet(
                 )
             }
 
+            GalleryTab.ARCHIVE -> {
+                SheetHeader("Archive", "Custom photo containers")
+            }
             GalleryTab.SETTINGS -> {
                 SheetHeader("Vault actions", "Maintenance of the sealed store")
                 SheetAction(
@@ -2272,6 +2308,14 @@ private fun MenuSheet(
             tint = ZarcPalette.bin,
             chevron = true,
             onClick = { onNavigate(GalleryTab.BIN) },
+        )
+        SheetAction(
+            icon = ZarcIcons.Shield,
+            title = "Zarc Disguised Archive",
+            subtitle = "Disguised Album.jpg and .zarc containers",
+            tint = MaterialTheme.colorScheme.primary,
+            chevron = true,
+            onClick = { onNavigate(GalleryTab.ARCHIVE) },
         )
         SheetAction(
             icon = ZarcIcons.Settings,
@@ -2859,7 +2903,7 @@ fun StealthGuideDialog(onDismiss: () -> Unit) {
                 }
                 Spacer(Modifier.height(12.dp))
                 Text(
-                    text = "Right now (%02d:%02d):\n• Minute: %s\n• Hour: %02d (reversed: %s)\n👉 Current PIN: %s".format(
+                    text = "Right now (%02d:%02d):\n• Minute: %s\n• Hour: %02d (reversed: %s)\nCurrent PIN: %s".format(
                         h24, min, mm, h24, h24Rev, samplePin
                     ),
                     style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold),

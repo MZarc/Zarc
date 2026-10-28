@@ -12,6 +12,8 @@ license = "Apache-2.0"
 zarc-core = { path = "crates/zarc-core" }
 thiserror = "2.0"
 zeroize = { version = "1.9", features = ["zeroize_derive"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 
 [profile.release]
 opt-level = 3

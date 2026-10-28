@@ -14,3 +14,5 @@ crate-type = ["cdylib", "rlib"]
 zarc-core.workspace = true
 jni = "0.21"
 zeroize.workspace = true
+serde.workspace = true
+serde_json.workspace = true

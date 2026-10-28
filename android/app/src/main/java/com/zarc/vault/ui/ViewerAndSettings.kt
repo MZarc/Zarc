@@ -1540,7 +1540,7 @@ fun SettingsScreen(state: GalleryUiState, viewModel: GalleryViewModel) {
                     )
                     Spacer(Modifier.height(4.dp))
                     Text(
-                        text = "Zero-Knowledge Military-Grade Encrypted Gallery",
+                        text = "Zero-Knowledge Hardware-Backed Encrypted Gallery",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -1797,7 +1797,7 @@ fun SettingsScreen(state: GalleryUiState, viewModel: GalleryViewModel) {
                             modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            Text("✉", fontSize = 16.sp)
+                            Icon(ZarcIcons.Mail, contentDescription = "Email", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(20.dp))
                             Spacer(Modifier.width(12.dp))
                             Column(Modifier.weight(1f)) {
                                 Text("Email", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -1827,7 +1827,7 @@ fun SettingsScreen(state: GalleryUiState, viewModel: GalleryViewModel) {
                             modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            Text("🌐", fontSize = 16.sp)
+                            Icon(ZarcIcons.Globe, contentDescription = "Website", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(20.dp))
                             Spacer(Modifier.width(12.dp))
                             Column(Modifier.weight(1f)) {
                                 Text("Portfolio / Website", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -1857,7 +1857,7 @@ fun SettingsScreen(state: GalleryUiState, viewModel: GalleryViewModel) {
                             modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            Text("💻", fontSize = 16.sp)
+                            Icon(ZarcIcons.Code, contentDescription = "GitHub", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(20.dp))
                             Spacer(Modifier.width(12.dp))
                             Column(Modifier.weight(1f)) {
                                 Text("GitHub", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)

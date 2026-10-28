@@ -31,6 +31,9 @@ enum class GalleryTab(val title: String) {
 
     /** The settings and the developer tools. */
     SETTINGS("Settings"),
+
+    /** The custom .zarc photo archive creator and extractor. */
+    ARCHIVE("Archive"),
 }
 
 /** Whether a section is reached through the floating navigation bar itself. */
@@ -192,6 +195,7 @@ data class GalleryUiState(
             GalleryTab.PRIVATE -> if (inPrivateBin) privateBinnedItems.size else privateItems.size
             GalleryTab.BIN -> binnedItems.size
             GalleryTab.SETTINGS -> 0
+            GalleryTab.ARCHIVE -> 0
         }
 
     /** Whether another page can be requested. */

@@ -8,12 +8,15 @@ import androidx.compose.material.icons.automirrored.rounded.OpenInNew
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.Code
 import androidx.compose.material.icons.rounded.DateRange
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.DeleteSweep
 import androidx.compose.material.icons.rounded.Edit
+import androidx.compose.material.icons.rounded.Email
 import androidx.compose.material.icons.rounded.Info
+import androidx.compose.material.icons.rounded.Language
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.Menu
 import androidx.compose.material.icons.rounded.MoreHoriz
@@ -120,4 +123,8 @@ internal object ZarcIcons {
     val Play = Icons.Rounded.PlayArrow
     val Pause = Icons.Rounded.Pause
     val Video = Icons.Rounded.Videocam
+
+    val Mail = Icons.Rounded.Email
+    val Globe = Icons.Rounded.Language
+    val Code = Icons.Rounded.Code
 }

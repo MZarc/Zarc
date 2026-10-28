@@ -34,6 +34,7 @@
 #![warn(clippy::pedantic)]
 #![allow(clippy::module_name_repetitions)]
 
+pub mod archive;
 pub mod container;
 pub mod error;
 pub mod fsutil;
