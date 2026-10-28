@@ -13,6 +13,14 @@ import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
 
+data class ArchivePhotoSource(
+    val displayName: String,
+    val sizeBytes: Long,
+    val uri: Uri? = null,
+    val localFile: File? = null,
+    val previewBitmap: Bitmap? = null,
+)
+
 data class ArchiveObject(
     val id: String,
     val originalName: String,
@@ -36,10 +44,9 @@ data class ArchiveManifestData(
 
 class ArchiveRepository(private val context: Context) {
 
-    suspend fun createArchive(
+    suspend fun createArchiveFromSources(
         outputFile: File,
-        inputUris: List<Uri>,
-        displayNames: List<String>,
+        sources: List<ArchivePhotoSource>,
         coverIndex: Int,
         passphrase: String,
         createAsPolyglotJpeg: Boolean = true,
@@ -50,15 +57,21 @@ class ArchiveRepository(private val context: Context) {
             val stagingPaths = mutableListOf<String>()
             val names = mutableListOf<String>()
 
-            for (i in inputUris.indices) {
-                val uri = inputUris[i]
-                val name = displayNames.getOrNull(i)?.takeIf { it.isNotBlank() } ?: "photo_$i.jpg"
+            for (i in sources.indices) {
+                val src = sources[i]
+                val name = src.displayName.takeIf { it.isNotBlank() } ?: "photo_$i.jpg"
                 val stageFile = File(stagingDir, "stage_$i.dat")
-                context.contentResolver.openInputStream(uri)?.use { input ->
-                    FileOutputStream(stageFile).use { output ->
-                        input.copyTo(output)
-                    }
-                } ?: return@withContext Result.failure(Exception("Cannot read photo at $uri"))
+                if (src.localFile != null && src.localFile.exists()) {
+                    src.localFile.copyTo(stageFile, overwrite = true)
+                } else if (src.uri != null) {
+                    context.contentResolver.openInputStream(src.uri)?.use { input ->
+                        FileOutputStream(stageFile).use { output ->
+                            input.copyTo(output)
+                        }
+                    } ?: return@withContext Result.failure(Exception("Cannot read photo at ${src.uri}"))
+                } else {
+                    return@withContext Result.failure(Exception("Invalid photo source at index $i"))
+                }
 
                 stagingPaths.add(stageFile.absolutePath)
                 names.add(name)
@@ -66,14 +79,12 @@ class ArchiveRepository(private val context: Context) {
 
             val validCoverIndex = coverIndex.coerceIn(0, (names.size - 1).coerceAtLeast(0))
 
-            // Obtain outer cover JPEG bytes for polyglot carrier disguise
             val outerCoverBytes: ByteArray? = if (createAsPolyglotJpeg && stagingPaths.isNotEmpty()) {
                 val coverFile = File(stagingPaths[validCoverIndex])
                 val rawBytes = coverFile.readBytes()
                 if (rawBytes.size >= 4 && rawBytes[0] == 0xFF.toByte() && rawBytes[1] == 0xD8.toByte()) {
                     rawBytes
                 } else {
-                    // Convert PNG/WebP to JPEG for the outer carrier
                     val bmp = BitmapFactory.decodeFile(coverFile.absolutePath)
                     if (bmp != null) {
                         val baos = ByteArrayOutputStream()
@@ -103,6 +114,30 @@ class ArchiveRepository(private val context: Context) {
         } finally {
             stagingDir.deleteRecursively()
         }
+    }
+
+    suspend fun createArchive(
+        outputFile: File,
+        inputUris: List<Uri>,
+        displayNames: List<String>,
+        coverIndex: Int,
+        passphrase: String,
+        createAsPolyglotJpeg: Boolean = true,
+    ): Result<File> {
+        val sources = inputUris.mapIndexed { idx, uri ->
+            ArchivePhotoSource(
+                displayName = displayNames.getOrNull(idx) ?: "photo_$idx.jpg",
+                sizeBytes = 0L,
+                uri = uri,
+            )
+        }
+        return createArchiveFromSources(
+            outputFile = outputFile,
+            sources = sources,
+            coverIndex = coverIndex,
+            passphrase = passphrase,
+            createAsPolyglotJpeg = createAsPolyglotJpeg,
+        )
     }
 
     suspend fun readOuterCover(archiveFile: File): Result<ByteArray?> = withContext(Dispatchers.IO) {
@@ -166,6 +201,38 @@ class ArchiveRepository(private val context: Context) {
             Result.success(destinationFile)
         } catch (e: Exception) {
             Result.failure(e)
+        }
+    }
+
+    suspend fun extractEntryToBitmap(
+        archiveFile: File,
+        passphrase: String,
+        objectId: String,
+        maxDimension: Int = 1080,
+    ): Result<Bitmap> = withContext(Dispatchers.IO) {
+        val tempFile = File(context.cacheDir, "preview_${objectId}_${System.currentTimeMillis()}.tmp")
+        try {
+            val res = extractSingleEntry(archiveFile, passphrase, objectId, tempFile)
+            if (res.isFailure) return@withContext Result.failure(res.exceptionOrNull() ?: Exception("Extraction failed"))
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeFile(tempFile.absolutePath, bounds)
+            if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
+                return@withContext Result.failure(Exception("Decoded image bounds invalid"))
+            }
+            var sample = 1
+            while (bounds.outWidth / sample > maxDimension * 2 || bounds.outHeight / sample > maxDimension * 2) {
+                sample *= 2
+            }
+            val opts = BitmapFactory.Options().apply {
+                inSampleSize = sample
+                inPreferredConfig = Bitmap.Config.ARGB_8888
+            }
+            val bmp = BitmapFactory.decodeFile(tempFile.absolutePath, opts)
+            if (bmp != null) Result.success(bmp) else Result.failure(Exception("Failed to decode bitmap"))
+        } catch (e: Exception) {
+            Result.failure(e)
+        } finally {
+            tempFile.delete()
         }
     }
 

@@ -295,7 +295,10 @@ fun GalleryApp(
                     GalleryTab.PRIVATE -> PrivateScreen(state, viewModel, onUnlockPrivate)
                     GalleryTab.BIN -> BinScreen(state, viewModel)
                     GalleryTab.SETTINGS -> SettingsScreen(state, viewModel)
-                    GalleryTab.ARCHIVE -> ArchiveScreen(onBack = { viewModel.selectTab(GalleryTab.PHOTOS) })
+                    GalleryTab.ARCHIVE -> ArchiveScreen(
+                        onBack = { viewModel.selectTab(GalleryTab.PHOTOS) },
+                        viewModel = viewModel,
+                    )
                 }
             }
         }
@@ -2309,14 +2312,77 @@ private fun MenuSheet(
             chevron = true,
             onClick = { onNavigate(GalleryTab.BIN) },
         )
-        SheetAction(
-            icon = ZarcIcons.Shield,
-            title = "Zarc Disguised Archive",
-            subtitle = "Disguised Album.jpg and .zarc containers",
-            tint = MaterialTheme.colorScheme.primary,
-            chevron = true,
-            onClick = { onNavigate(GalleryTab.ARCHIVE) },
-        )
+        // Prominently featured Zarc Disguised Archive
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 4.dp, vertical = 6.dp)
+                .clip(RoundedCornerShape(20.dp))
+                .clickable { onNavigate(GalleryTab.ARCHIVE) },
+            shape = RoundedCornerShape(20.dp),
+            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.12f),
+            border = BorderStroke(1.5.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.40f)),
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 14.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(44.dp)
+                        .clip(RoundedCornerShape(13.dp))
+                        .background(MaterialTheme.colorScheme.primary),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        imageVector = ZarcIcons.Shield,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onPrimary,
+                        modifier = Modifier.size(22.dp),
+                    )
+                }
+                Spacer(Modifier.width(14.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Text(
+                            text = "Zarc Disguised Archive",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurface,
+                        )
+                        Surface(
+                            shape = RoundedCornerShape(6.dp),
+                            color = MaterialTheme.colorScheme.primary,
+                        ) {
+                            Text(
+                                text = "FEATURED",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Black,
+                                color = MaterialTheme.colorScheme.onPrimary,
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                            )
+                        }
+                    }
+                    Spacer(Modifier.height(2.dp))
+                    Text(
+                        text = "Disguised Album.jpg & native .zarc containers",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Icon(
+                    imageVector = ZarcIcons.Chevron,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(20.dp),
+                )
+            }
+        }
         SheetAction(
             icon = ZarcIcons.Settings,
             title = "Settings",
