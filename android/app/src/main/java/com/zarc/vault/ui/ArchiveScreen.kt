@@ -20,10 +20,10 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -33,16 +33,21 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.itemsIndexed
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -75,9 +80,11 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
@@ -93,6 +100,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.documentfile.provider.DocumentFile
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.zarc.vault.archive.ArchiveManifestData
@@ -118,25 +126,7 @@ enum class ArchiveScreenMode {
 }
 
 /**
- * Masterpiece Disguised Photo Archive Screen.
- *
- * Implements:
- * 1. Clean, atmospheric landing hub with two balanced action cards:
- *    - "Create Archive"
- *    - "Extract Archive"
- * 2. Create flow:
- *    - Concise metadata sanitization note
- *    - Multi-photo tray supporting Phone Gallery AND Zarc Vault
- *    - Cover photo selection
- *    - Disguise as JPEG toggle (ON by default)
- *    - Configuration modal with uneditable extension badge (.jpg/.zarc)
- *    - Build & save via SAF CreateDocument
- * 3. Extract flow:
- *    - File picker for .jpg or .zarc
- *    - Instant zero-knowledge unencrypted outer cover preview
- *    - Passphrase prompt with robust error handling
- *    - Vault Gallery UI with 3-column grid, interactive full-screen viewer with mini-roll filmstrip
- *    - Single photo extraction and "Extract all" directory export
+ * Zarc Disguised Photo Archive Screen.
  */
 @Composable
 fun ArchiveScreen(
@@ -186,7 +176,7 @@ fun ArchiveScreen(
 }
 
 // -----------------------------------------------------------------------------
-// 1. ARCHIVE LAUNCHER SCREEN (CLEAN, ATMOSPHERIC, PURPOSEFUL)
+// 1. ARCHIVE LAUNCHER SCREEN
 // -----------------------------------------------------------------------------
 
 @Composable
@@ -231,7 +221,7 @@ private fun ArchiveLauncherScreen(
 
         Spacer(Modifier.height(12.dp))
 
-        // Quiet Security Status Tag
+        // Security Status Tag
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -248,40 +238,37 @@ private fun ArchiveLauncherScreen(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Icon(
-                        imageVector = ZarcIcons.Shield,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.size(14.dp)
+                    Box(
+                        modifier = Modifier
+                            .size(7.dp)
+                            .clip(CircleShape)
+                            .background(ZarcPalette.verified)
                     )
                     Text(
-                        text = "Argon2id · XChaCha20-Poly1305 · 100% Offline",
+                        text = "Native libsodium engine · 100% offline",
                         style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        fontSize = 11.sp
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
             }
         }
 
-        Spacer(Modifier.height(20.dp))
+        Spacer(Modifier.height(28.dp))
 
-        // Two Balanced Action Cards
+        // Main Action Hub Cards
         Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = 16.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp)
+            verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
             // Card 1: Create Archive
             Surface(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(22.dp))
-                    .clickable(onClick = onCreateClick),
+                onClick = onCreateClick,
                 shape = RoundedCornerShape(22.dp),
                 color = MaterialTheme.colorScheme.surfaceContainer,
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.40f)),
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                tonalElevation = 1.dp
             ) {
                 Row(
                     modifier = Modifier
@@ -293,14 +280,14 @@ private fun ArchiveLauncherScreen(
                         modifier = Modifier
                             .size(54.dp)
                             .clip(RoundedCornerShape(16.dp))
-                            .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)),
+                            .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)),
                         contentAlignment = Alignment.Center
                     ) {
                         Icon(
-                            imageVector = ZarcIcons.Import,
+                            imageVector = ZarcIcons.Add,
                             contentDescription = null,
                             tint = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.size(28.dp)
+                            modifier = Modifier.size(26.dp)
                         )
                     }
 
@@ -318,7 +305,7 @@ private fun ArchiveLauncherScreen(
                             )
                             Surface(
                                 shape = RoundedCornerShape(6.dp),
-                                color = MaterialTheme.colorScheme.primary.copy(alpha = 0.20f),
+                                color = MaterialTheme.colorScheme.primary.copy(alpha = 0.14f),
                             ) {
                                 Text(
                                     text = "PACK",
@@ -343,7 +330,7 @@ private fun ArchiveLauncherScreen(
                     Icon(
                         imageVector = ZarcIcons.Chevron,
                         contentDescription = null,
-                        tint = MaterialTheme.colorScheme.primary,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.size(22.dp)
                     )
                 }
@@ -351,13 +338,11 @@ private fun ArchiveLauncherScreen(
 
             // Card 2: Extract Archive
             Surface(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(22.dp))
-                    .clickable(onClick = onExtractClick),
+                onClick = onExtractClick,
                 shape = RoundedCornerShape(22.dp),
                 color = MaterialTheme.colorScheme.surfaceContainer,
                 border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                tonalElevation = 1.dp
             ) {
                 Row(
                     modifier = Modifier
@@ -369,14 +354,14 @@ private fun ArchiveLauncherScreen(
                         modifier = Modifier
                             .size(54.dp)
                             .clip(RoundedCornerShape(16.dp))
-                            .background(MaterialTheme.colorScheme.surfaceContainerHighest),
+                            .background(MaterialTheme.colorScheme.secondary.copy(alpha = 0.12f)),
                         contentAlignment = Alignment.Center
                     ) {
                         Icon(
                             imageVector = ZarcIcons.Lock,
                             contentDescription = null,
-                            tint = MaterialTheme.colorScheme.onSurface,
-                            modifier = Modifier.size(28.dp)
+                            tint = MaterialTheme.colorScheme.secondary,
+                            modifier = Modifier.size(26.dp)
                         )
                     }
 
@@ -407,7 +392,7 @@ private fun ArchiveLauncherScreen(
                         }
                         Spacer(Modifier.height(4.dp))
                         Text(
-                            text = "Open Album.jpg or .zarc container, authenticate, browse gallery, and extract media.",
+                            text = "Open disguised photo (.jpg) or .zarc container, authenticate, browse gallery, and extract media.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             lineHeight = 16.sp
@@ -439,23 +424,21 @@ private fun ArchiveLauncherScreen(
             Icon(
                 imageVector = ZarcIcons.Shield,
                 contentDescription = null,
-                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
-                modifier = Modifier
-                    .size(16.dp)
-                    .padding(top = 2.dp)
+                tint = MaterialTheme.colorScheme.outline,
+                modifier = Modifier.size(18.dp)
             )
             Text(
                 text = "Disguised JPEG photos display their cover normally in any phone gallery or cloud backup without exposing encrypted photos.",
                 style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
-                lineHeight = 17.sp
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
+                lineHeight = 16.sp
             )
         }
     }
 }
 
 // -----------------------------------------------------------------------------
-// 2. CREATE ARCHIVE FLOW (HIGH-CRAFT WORKBENCH)
+// 2. CREATE ARCHIVE FLOW
 // -----------------------------------------------------------------------------
 
 @Composable
@@ -469,15 +452,17 @@ private fun CreateArchiveFlow(
 
     val selectedSources = remember { mutableStateListOf<ArchivePhotoSource>() }
     var coverIndex by remember { mutableIntStateOf(0) }
+    var externalCoverSource by remember { mutableStateOf<ArchivePhotoSource?>(null) }
     var disguiseAsJpeg by remember { mutableStateOf(true) }
 
     var showVaultPicker by remember { mutableStateOf(false) }
     var showConfigDialog by remember { mutableStateOf(false) }
+    var previewingSource by remember { mutableStateOf<ArchivePhotoSource?>(null) }
 
     var isBuilding by remember { mutableStateOf(false) }
     var buildProgress by remember { mutableStateOf<String?>(null) }
     var builtTempFile by remember { mutableStateOf<File?>(null) }
-    var pendingExportName by remember { mutableStateOf("Album.jpg") }
+    var pendingExportName by remember { mutableStateOf("") }
 
     val phonePhotoPicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickMultipleVisualMedia(maxItems = 100)
@@ -494,6 +479,22 @@ private fun CreateArchiveFlow(
                     )
                 )
             }
+        }
+    }
+
+    // Picker for custom external cover photo
+    val externalCoverPicker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia()
+    ) { uri ->
+        if (uri != null) {
+            val name = queryFileName(context, uri) ?: "cover_${System.currentTimeMillis()}.jpg"
+            val size = queryFileSize(context, uri)
+            externalCoverSource = ArchivePhotoSource(
+                displayName = name,
+                sizeBytes = size,
+                uri = uri
+            )
+            Toast.makeText(context, "External cover selected", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -531,7 +532,9 @@ private fun CreateArchiveFlow(
         modifier = Modifier
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
-            .padding(bottom = 36.dp)
+            .imePadding()
+            .navigationBarsPadding()
+            .padding(bottom = 32.dp)
     ) {
         // Top App Bar
         Row(
@@ -563,7 +566,7 @@ private fun CreateArchiveFlow(
 
         Spacer(Modifier.height(8.dp))
 
-        // Concise Security Notice
+        // Concise Metadata Sanitization Notice
         Surface(
             modifier = Modifier
                 .fillMaxWidth()
@@ -581,27 +584,27 @@ private fun CreateArchiveFlow(
                     imageVector = ZarcIcons.Shield,
                     contentDescription = null,
                     tint = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.size(16.dp)
+                    modifier = Modifier.size(18.dp)
                 )
                 Text(
                     text = "EXIF metadata, GPS, and serials are stripped automatically before packaging.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    lineHeight = 16.sp
+                    lineHeight = 15.sp
                 )
             }
         }
 
-        Spacer(Modifier.height(16.dp))
+        Spacer(Modifier.height(18.dp))
 
-        // Photos Container Area
+        // Photos Selection Section
         if (selectedSources.isEmpty()) {
-            // Empty State Dropzone Card
+            // Empty Dropzone State
             Surface(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(horizontal = 16.dp),
-                shape = RoundedCornerShape(20.dp),
+                shape = RoundedCornerShape(22.dp),
                 color = MaterialTheme.colorScheme.surfaceContainer,
                 border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
             ) {
@@ -615,7 +618,7 @@ private fun CreateArchiveFlow(
                         modifier = Modifier
                             .size(56.dp)
                             .clip(CircleShape)
-                            .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)),
+                            .background(MaterialTheme.colorScheme.surfaceContainerHighest),
                         contentAlignment = Alignment.Center
                     ) {
                         Icon(
@@ -630,13 +633,10 @@ private fun CreateArchiveFlow(
 
                     Text(
                         text = "No photos selected",
-                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold),
-                        color = MaterialTheme.colorScheme.onSurface,
-                        textAlign = TextAlign.Center
+                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                        color = MaterialTheme.colorScheme.onSurface
                     )
-
                     Spacer(Modifier.height(4.dp))
-
                     Text(
                         text = "Add photos from your device gallery or encrypted vault",
                         style = MaterialTheme.typography.bodySmall,
@@ -656,33 +656,37 @@ private fun CreateArchiveFlow(
                                     PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
                                 )
                             },
-                            modifier = Modifier.weight(1f),
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(46.dp),
                             shape = RoundedCornerShape(14.dp),
                             colors = ButtonDefaults.buttonColors(
                                 containerColor = MaterialTheme.colorScheme.primary,
                                 contentColor = MaterialTheme.colorScheme.onPrimary
                             )
                         ) {
-                            Icon(ZarcIcons.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Icon(ZarcIcons.Import, contentDescription = null, modifier = Modifier.size(16.dp))
                             Spacer(Modifier.width(6.dp))
-                            Text("From Phone")
+                            Text("From Phone", style = MaterialTheme.typography.labelMedium)
                         }
 
                         OutlinedButton(
                             onClick = { showVaultPicker = true },
-                            modifier = Modifier.weight(1f),
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(46.dp),
                             shape = RoundedCornerShape(14.dp),
-                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
                         ) {
-                            Icon(ZarcIcons.Lock, contentDescription = null, modifier = Modifier.size(18.dp), tint = MaterialTheme.colorScheme.primary)
+                            Icon(ZarcIcons.Lock, contentDescription = null, modifier = Modifier.size(16.dp))
                             Spacer(Modifier.width(6.dp))
-                            Text("From Vault", color = MaterialTheme.colorScheme.onSurface)
+                            Text("From Vault", style = MaterialTheme.typography.labelMedium)
                         }
                     }
                 }
             }
         } else {
-            // Selected Photos Active Workbench
+            // Selected Photos Container
             Surface(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -696,7 +700,7 @@ private fun CreateArchiveFlow(
                         .fillMaxWidth()
                         .padding(16.dp)
                 ) {
-                    // Header with count & action chips
+                    // Header with count & Clear all button (never truncated!)
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
@@ -716,59 +720,63 @@ private fun CreateArchiveFlow(
                             )
                         }
 
-                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            Surface(
-                                shape = RoundedCornerShape(10.dp),
-                                color = MaterialTheme.colorScheme.surfaceContainerHighest,
-                                modifier = Modifier.clickable {
-                                    phonePhotoPicker.launch(
-                                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
-                                    )
-                                }
-                            ) {
-                                Row(
-                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
-                                ) {
-                                    Icon(ZarcIcons.Add, contentDescription = null, modifier = Modifier.size(14.dp), tint = MaterialTheme.colorScheme.primary)
-                                    Text("Phone", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurface)
-                                }
-                            }
+                        TextButton(
+                            onClick = { selectedSources.clear() },
+                            colors = ButtonDefaults.textButtonColors(
+                                contentColor = MaterialTheme.colorScheme.error
+                            )
+                        ) {
+                            Icon(
+                                imageVector = ZarcIcons.Delete,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(Modifier.width(4.dp))
+                            Text("Clear all", style = MaterialTheme.typography.labelMedium)
+                        }
+                    }
 
-                            Surface(
-                                shape = RoundedCornerShape(10.dp),
-                                color = MaterialTheme.colorScheme.surfaceContainerHighest,
-                                modifier = Modifier.clickable { showVaultPicker = true }
-                            ) {
-                                Row(
-                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
-                                ) {
-                                    Icon(ZarcIcons.Lock, contentDescription = null, modifier = Modifier.size(14.dp), tint = MaterialTheme.colorScheme.primary)
-                                    Text("Vault", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurface)
-                                }
-                            }
+                    Spacer(Modifier.height(12.dp))
 
-                            Surface(
-                                shape = RoundedCornerShape(10.dp),
-                                color = MaterialTheme.colorScheme.error.copy(alpha = 0.12f),
-                                modifier = Modifier.clickable { selectedSources.clear() }
-                            ) {
-                                Text(
-                                    text = "Clear",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.error,
-                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp)
+                    // Dedicated, spacious Add buttons (50% width each - zero truncation!)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        OutlinedButton(
+                            onClick = {
+                                phonePhotoPicker.launch(
+                                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
                                 )
-                            }
+                            },
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(42.dp),
+                            shape = RoundedCornerShape(12.dp),
+                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+                        ) {
+                            Icon(ZarcIcons.Add, contentDescription = null, modifier = Modifier.size(16.dp), tint = MaterialTheme.colorScheme.primary)
+                            Spacer(Modifier.width(6.dp))
+                            Text("From Phone", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurface)
+                        }
+
+                        OutlinedButton(
+                            onClick = { showVaultPicker = true },
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(42.dp),
+                            shape = RoundedCornerShape(12.dp),
+                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+                        ) {
+                            Icon(ZarcIcons.Lock, contentDescription = null, modifier = Modifier.size(16.dp), tint = MaterialTheme.colorScheme.primary)
+                            Spacer(Modifier.width(6.dp))
+                            Text("From Vault", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurface)
                         }
                     }
 
                     Spacer(Modifier.height(14.dp))
                     Text(
-                        text = "Tap a photo to set as cover image",
+                        text = "Tap a photo to preview full-screen or set as cover image",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -779,7 +787,7 @@ private fun CreateArchiveFlow(
                         horizontalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
                         itemsIndexed(selectedSources) { index, source ->
-                            val isCover = (index == coverIndex)
+                            val isCover = (index == coverIndex && externalCoverSource == null)
                             val bitmap = remember(source) {
                                 loadSourceThumbnail(context, source)
                             }
@@ -793,7 +801,10 @@ private fun CreateArchiveFlow(
                                         color = if (isCover) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant,
                                         shape = RoundedCornerShape(16.dp)
                                     )
-                                    .clickable { coverIndex = index }
+                                    .clickable {
+                                        // Tap opens the large preview modal!
+                                        previewingSource = source
+                                    }
                             ) {
                                 if (bitmap != null) {
                                     Image(
@@ -829,7 +840,7 @@ private fun CreateArchiveFlow(
                                     }
                                 }
 
-                                // Remove button
+                                // Quick remove button
                                 Box(
                                     modifier = Modifier
                                         .align(Alignment.BottomEnd)
@@ -855,7 +866,133 @@ private fun CreateArchiveFlow(
 
             Spacer(Modifier.height(14.dp))
 
-            // Disguise as JPEG Option (Only shown after photos are added)
+            // External Cover Photo Selector Card
+            Surface(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp),
+                shape = RoundedCornerShape(18.dp),
+                color = MaterialTheme.colorScheme.surfaceContainer,
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(40.dp)
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(MaterialTheme.colorScheme.surfaceContainerHighest),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = ZarcIcons.Image,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(22.dp)
+                            )
+                        }
+
+                        Spacer(Modifier.width(12.dp))
+
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Cover Photo",
+                                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                            Text(
+                                text = if (externalCoverSource != null) "Using custom external photo as outer cover"
+                                       else "Using selected photo #${coverIndex + 1} as outer cover",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+
+                        if (externalCoverSource != null) {
+                            TextButton(onClick = { externalCoverSource = null }) {
+                                Text("Reset", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.labelMedium)
+                            }
+                        } else {
+                            OutlinedButton(
+                                onClick = {
+                                    externalCoverPicker.launch(
+                                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                                    )
+                                },
+                                shape = RoundedCornerShape(10.dp)
+                            ) {
+                                Text("Choose External", style = MaterialTheme.typography.labelSmall)
+                            }
+                        }
+                    }
+
+                    // If external cover is chosen, display preview thumbnail with big preview tap
+                    if (externalCoverSource != null) {
+                        Spacer(Modifier.height(12.dp))
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(MaterialTheme.colorScheme.surfaceContainerHighest)
+                                .clickable { previewingSource = externalCoverSource }
+                                .padding(8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            val extBmp = remember(externalCoverSource) {
+                                loadSourceThumbnail(context, externalCoverSource!!)
+                            }
+                            if (extBmp != null) {
+                                Image(
+                                    bitmap = extBmp.asImageBitmap(),
+                                    contentDescription = "External Cover",
+                                    modifier = Modifier
+                                        .size(48.dp)
+                                        .clip(RoundedCornerShape(8.dp)),
+                                    contentScale = ContentScale.Crop
+                                )
+                            }
+                            Column(modifier = Modifier.weight(1f)) {
+                                Surface(
+                                    shape = RoundedCornerShape(6.dp),
+                                    color = MaterialTheme.colorScheme.primary.copy(alpha = 0.16f),
+                                ) {
+                                    Text(
+                                        text = "EXTERNAL COVER",
+                                        style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Black),
+                                        color = MaterialTheme.colorScheme.primary,
+                                        fontSize = 8.sp,
+                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                    )
+                                }
+                                Text(
+                                    text = externalCoverSource?.displayName ?: "cover.jpg",
+                                    style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Medium),
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                            Text(
+                                text = "Tap to preview",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(14.dp))
+
+            // Disguise as JPEG Option
             Surface(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -898,25 +1035,23 @@ private fun CreateArchiveFlow(
                         )
                         Spacer(Modifier.height(2.dp))
                         Text(
-                            text = if (disguiseAsJpeg) {
-                                "Compatible with any gallery or Google Photos. Private payload stays 100% encrypted."
-                            } else {
-                                "Standard raw .zarc container format."
-                            },
+                            text = "Compatible with any gallery or Google Photos. Private payload stays 100% encrypted.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             lineHeight = 15.sp
                         )
                     }
 
-                    Spacer(Modifier.width(8.dp))
+                    Spacer(Modifier.width(10.dp))
 
                     Switch(
                         checked = disguiseAsJpeg,
                         onCheckedChange = { disguiseAsJpeg = it },
                         colors = SwitchDefaults.colors(
                             checkedThumbColor = MaterialTheme.colorScheme.primary,
-                            checkedTrackColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.25f)
+                            checkedTrackColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.35f),
+                            uncheckedThumbColor = MaterialTheme.colorScheme.outline,
+                            uncheckedTrackColor = MaterialTheme.colorScheme.surfaceContainerHighest,
                         )
                     )
                 }
@@ -924,7 +1059,7 @@ private fun CreateArchiveFlow(
 
             Spacer(Modifier.height(24.dp))
 
-            // Prominent Continue Button
+            // Bottom Continue Action Button
             Button(
                 onClick = { showConfigDialog = true },
                 modifier = Modifier
@@ -947,28 +1082,56 @@ private fun CreateArchiveFlow(
                     Spacer(Modifier.width(10.dp))
                     Text(buildProgress ?: "Building archive...")
                 } else {
-                    Text(
-                        text = "Continue to Passphrase",
-                        style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold)
-                    )
+                    Icon(imageVector = ZarcIcons.Shield, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("Continue to Passphrase", style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold))
                 }
             }
         }
     }
 
-    // Modal: Vault Photo Picker Dialog
+    // Vault Multi-Photo Picker Dialog with Pagination
     if (showVaultPicker) {
         VaultPhotoPickerDialog(
             viewModel = viewModel,
             onDismiss = { showVaultPicker = false },
-            onAddSelected = { addedVaultSources ->
-                selectedSources.addAll(addedVaultSources)
+            onAddSelected = { addedSources ->
+                selectedSources.addAll(addedSources)
                 showVaultPicker = false
             }
         )
     }
 
-    // Modal: Output Filename & Encryption Passphrase Dialog
+    // Big Photo Preview Modal
+    if (previewingSource != null) {
+        PhotoPreviewModal(
+            source = previewingSource!!,
+            isCover = (selectedSources.indexOf(previewingSource) == coverIndex && externalCoverSource == null) || (previewingSource == externalCoverSource),
+            isExternal = (previewingSource == externalCoverSource),
+            onSetAsCover = {
+                val idx = selectedSources.indexOf(previewingSource)
+                if (idx >= 0) {
+                    coverIndex = idx
+                    externalCoverSource = null
+                }
+                previewingSource = null
+            },
+            onRemove = {
+                if (previewingSource == externalCoverSource) {
+                    externalCoverSource = null
+                } else {
+                    selectedSources.remove(previewingSource)
+                    if (coverIndex >= selectedSources.size) {
+                        coverIndex = (selectedSources.size - 1).coerceAtLeast(0)
+                    }
+                }
+                previewingSource = null
+            },
+            onClose = { previewingSource = null }
+        )
+    }
+
+    // Archive Configuration Dialog (With full-width Hallmark button & keyboard protection)
     if (showConfigDialog) {
         ArchiveConfigDialog(
             photoCount = selectedSources.size,
@@ -977,30 +1140,29 @@ private fun CreateArchiveFlow(
             onConfirm = { filename, passphrase ->
                 showConfigDialog = false
                 isBuilding = true
-                buildProgress = "Packaging ${selectedSources.size} photos..."
+                buildProgress = "Packaging and encrypting..."
+
+                val ext = if (disguiseAsJpeg) ".jpg" else ".zarc"
+                val cleanBase = filename.trim().ifEmpty { "archive_${System.currentTimeMillis()}" }
+                val finalName = if (cleanBase.endsWith(ext, ignoreCase = true)) cleanBase else "$cleanBase$ext"
+                pendingExportName = finalName
 
                 scope.launch {
-                    val safeFilename = if (disguiseAsJpeg) {
-                        if (filename.endsWith(".jpg", ignoreCase = true)) filename else "$filename.jpg"
-                    } else {
-                        if (filename.endsWith(".zarc", ignoreCase = true)) filename else "$filename.zarc"
-                    }
-                    pendingExportName = safeFilename
-
-                    val tempOutFile = File(context.cacheDir, "built_archive_${System.currentTimeMillis()}.dat")
+                    val tempOut = File(context.cacheDir, "built_${System.currentTimeMillis()}$ext")
                     val result = repository.createArchiveFromSources(
-                        outputFile = tempOutFile,
+                        outputFile = tempOut,
                         sources = selectedSources.toList(),
                         coverIndex = coverIndex,
                         passphrase = passphrase,
                         createAsPolyglotJpeg = disguiseAsJpeg,
+                        externalCoverSource = externalCoverSource
                     )
 
                     result.fold(
-                        onSuccess = { tempArchiveFile ->
-                            builtTempFile = tempArchiveFile
-                            buildProgress = "Select save destination..."
-                            saveDocumentLauncher.launch(safeFilename)
+                        onSuccess = { createdFile ->
+                            builtTempFile = createdFile
+                            buildProgress = "Container built! Choose destination..."
+                            saveDocumentLauncher.launch(finalName)
                         },
                         onFailure = { error ->
                             isBuilding = false
@@ -1015,7 +1177,7 @@ private fun CreateArchiveFlow(
 }
 
 // -----------------------------------------------------------------------------
-// 3. VAULT PHOTO PICKER DIALOG (CLEAN, FLUID MULTI-SELECTION)
+// 3. VAULT PHOTO PICKER DIALOG (WITH PAGINATION & CACHED THUMBNAILS)
 // -----------------------------------------------------------------------------
 
 @Composable
@@ -1030,11 +1192,29 @@ private fun VaultPhotoPickerDialog(
     }
     val selectedItemIds = remember { mutableStateListOf<String>() }
 
+    // Pagination: 24 items per page
+    val pageSize = 24
+    var pageCount by remember { mutableIntStateOf(1) }
+    val visibleItems = remember(vaultItems, pageCount) {
+        vaultItems.take(pageCount * pageSize)
+    }
+    val gridState = rememberLazyGridState()
+
+    // Infinite scroll listener for smooth pagination
+    LaunchedEffect(gridState, vaultItems.size) {
+        snapshotFlow { gridState.layoutInfo.visibleItemsInfo.lastOrNull()?.index }
+            .collect { lastIdx ->
+                if (lastIdx != null && lastIdx >= visibleItems.size - 6 && visibleItems.size < vaultItems.size) {
+                    pageCount += 1
+                }
+            }
+    }
+
     Dialog(onDismissRequest = onDismiss) {
         Surface(
             modifier = Modifier
                 .fillMaxWidth()
-                .heightIn(min = 360.dp, max = 560.dp),
+                .heightIn(min = 400.dp, max = 580.dp),
             shape = RoundedCornerShape(24.dp),
             color = MaterialTheme.colorScheme.surfaceContainerHigh,
             border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
@@ -1057,7 +1237,7 @@ private fun VaultPhotoPickerDialog(
                             color = MaterialTheme.colorScheme.onSurface
                         )
                         Text(
-                            text = "${selectedItemIds.size} photos selected",
+                            text = "Showing ${visibleItems.size} of ${vaultItems.size} · ${selectedItemIds.size} selected",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -1082,7 +1262,7 @@ private fun VaultPhotoPickerDialog(
 
                 Spacer(Modifier.height(14.dp))
 
-                // Photos Grid
+                // Photos Grid with Pagination
                 if (vaultItems.isEmpty()) {
                     Box(
                         modifier = Modifier
@@ -1099,11 +1279,12 @@ private fun VaultPhotoPickerDialog(
                 } else {
                     LazyVerticalGrid(
                         columns = GridCells.Fixed(3),
+                        state = gridState,
                         modifier = Modifier.weight(1f),
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        itemsIndexed(vaultItems) { _, item ->
+                        itemsIndexed(visibleItems) { _, item ->
                             val isSelected = selectedItemIds.contains(item.id)
 
                             Box(
@@ -1123,48 +1304,32 @@ private fun VaultPhotoPickerDialog(
                                         }
                                     }
                             ) {
-                                val thumbBmp = remember(item.id) {
-                                    val decryptedFile = viewModel.repository.decrypt(item, item.isPrivate)
-                                    if (decryptedFile.exists()) {
-                                        val opts = BitmapFactory.Options().apply { inSampleSize = 4 }
-                                        BitmapFactory.decodeFile(decryptedFile.absolutePath, opts)
-                                    } else null
-                                }
-
-                                if (thumbBmp != null) {
-                                    Image(
-                                        bitmap = thumbBmp.asImageBitmap(),
-                                        contentDescription = item.name,
-                                        modifier = Modifier.fillMaxSize(),
-                                        contentScale = ContentScale.Crop
-                                    )
-                                } else {
-                                    Box(
-                                        modifier = Modifier
-                                            .fillMaxSize()
-                                            .background(MaterialTheme.colorScheme.surfaceContainerHighest),
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        Icon(ZarcIcons.Lock, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                                    }
-                                }
+                                MediaThumbnail(
+                                    repository = viewModel.repository,
+                                    item = item,
+                                    isPrivate = item.isPrivate,
+                                    modifier = Modifier.fillMaxSize()
+                                )
 
                                 if (isSelected) {
                                     Box(
                                         modifier = Modifier
                                             .fillMaxSize()
-                                            .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.25f))
-                                    )
-                                    Box(
-                                        modifier = Modifier
-                                            .align(Alignment.TopEnd)
-                                            .padding(4.dp)
-                                            .size(20.dp)
-                                            .clip(CircleShape)
-                                            .background(MaterialTheme.colorScheme.primary),
-                                        contentAlignment = Alignment.Center
+                                            .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.28f)),
+                                        contentAlignment = Alignment.TopEnd
                                     ) {
-                                        Text("✓", color = MaterialTheme.colorScheme.onPrimary, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                        Surface(
+                                            shape = RoundedCornerShape(bottomStart = 8.dp),
+                                            color = MaterialTheme.colorScheme.primary,
+                                        ) {
+                                            Text(
+                                                text = "✓",
+                                                color = MaterialTheme.colorScheme.onPrimary,
+                                                fontWeight = FontWeight.Bold,
+                                                fontSize = 11.sp,
+                                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                            )
+                                        }
                                     }
                                 }
 
@@ -1172,7 +1337,7 @@ private fun VaultPhotoPickerDialog(
                                     modifier = Modifier
                                         .fillMaxWidth()
                                         .align(Alignment.BottomCenter),
-                                    color = Color.Black.copy(alpha = 0.55f)
+                                    color = Color.Black.copy(alpha = 0.60f)
                                 ) {
                                     Text(
                                         text = item.name,
@@ -1186,12 +1351,33 @@ private fun VaultPhotoPickerDialog(
                                 }
                             }
                         }
+
+                        // Load More trigger item if more items are available
+                        if (visibleItems.size < vaultItems.size) {
+                            item {
+                                Box(
+                                    modifier = Modifier
+                                        .aspectRatio(1f)
+                                        .clip(RoundedCornerShape(12.dp))
+                                        .background(MaterialTheme.colorScheme.surfaceContainerHighest)
+                                        .clickable { pageCount += 1 },
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(
+                                        text = "+ More\n(${vaultItems.size - visibleItems.size})",
+                                        style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                        color = MaterialTheme.colorScheme.primary,
+                                        textAlign = TextAlign.Center
+                                    )
+                                }
+                            }
+                        }
                     }
                 }
 
                 Spacer(Modifier.height(16.dp))
 
-                // Bottom Dialog Actions
+                // Footer Actions
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.End,
@@ -1209,15 +1395,15 @@ private fun VaultPhotoPickerDialog(
                                 if (decryptedFile.exists()) {
                                     ArchivePhotoSource(
                                         displayName = item.name,
-                                        sizeBytes = item.size,
+                                        sizeBytes = decryptedFile.length(),
                                         localFile = decryptedFile,
                                     )
                                 } else null
                             }
                             onAddSelected(sources)
                         },
-                        shape = RoundedCornerShape(12.dp),
-                        enabled = selectedItemIds.isNotEmpty()
+                        enabled = selectedItemIds.isNotEmpty(),
+                        shape = RoundedCornerShape(12.dp)
                     ) {
                         Text("Add selected (${selectedItemIds.size})")
                     }
@@ -1228,7 +1414,118 @@ private fun VaultPhotoPickerDialog(
 }
 
 // -----------------------------------------------------------------------------
-// 4. ARCHIVE CONFIGURATION DIALOG (POPUP WITH UNEDITABLE EXTENSION BADGE)
+// 4. BIG PHOTO PREVIEW MODAL (FULL-SCREEN INSPECTION)
+// -----------------------------------------------------------------------------
+
+@Composable
+private fun PhotoPreviewModal(
+    source: ArchivePhotoSource,
+    isCover: Boolean,
+    isExternal: Boolean,
+    onSetAsCover: () -> Unit,
+    onRemove: () -> Unit,
+    onClose: () -> Unit,
+) {
+    val context = LocalContext.current
+    val fullBmp = remember(source) {
+        loadSourceBitmap(context, source, maxDimension = 2048)
+    }
+
+    Dialog(
+        onDismissRequest = onClose,
+        properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false)
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black)
+        ) {
+            // High-Res Image View
+            if (fullBmp != null) {
+                Image(
+                    bitmap = fullBmp.asImageBitmap(),
+                    contentDescription = source.displayName,
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = ContentScale.Fit
+                )
+            } else {
+                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
+                }
+            }
+
+            // Top Bar
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .align(Alignment.TopCenter)
+                    .statusBarsPadding()
+                    .background(Brush.verticalGradient(listOf(Color.Black.copy(alpha = 0.85f), Color.Transparent)))
+                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                IconButton(onClick = onClose) {
+                    Icon(imageVector = ZarcIcons.Back, contentDescription = "Close", tint = Color.White)
+                }
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = source.displayName,
+                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                        color = Color.White,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        text = formatBytes(source.sizeBytes) + if (isCover) " · Current Cover" else "",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color.White.copy(alpha = 0.75f)
+                    )
+                }
+            }
+
+            // Bottom Actions Bar
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .align(Alignment.BottomCenter)
+                    .navigationBarsPadding()
+                    .background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = 0.90f))))
+                    .padding(horizontal = 20.dp, vertical = 18.dp),
+                horizontalArrangement = Arrangement.spacedBy(14.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                if (!isExternal) {
+                    Button(
+                        onClick = onSetAsCover,
+                        modifier = Modifier.weight(1f).height(46.dp),
+                        shape = RoundedCornerShape(14.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (isCover) MaterialTheme.colorScheme.surfaceContainerHighest else MaterialTheme.colorScheme.primary,
+                            contentColor = if (isCover) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onPrimary
+                        )
+                    ) {
+                        Text(if (isCover) "✓ Archive Cover" else "Set as Cover")
+                    }
+                }
+
+                OutlinedButton(
+                    onClick = onRemove,
+                    modifier = Modifier.weight(1f).height(46.dp),
+                    shape = RoundedCornerShape(14.dp),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.6f)),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error)
+                ) {
+                    Icon(ZarcIcons.Delete, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("Remove")
+                }
+            }
+        }
+    }
+}
+
+// -----------------------------------------------------------------------------
+// 5. ARCHIVE CONFIGURATION DIALOG
 // -----------------------------------------------------------------------------
 
 @Composable
@@ -1238,7 +1535,7 @@ private fun ArchiveConfigDialog(
     onDismiss: () -> Unit,
     onConfirm: (filename: String, passphrase: String) -> Unit,
 ) {
-    var filename by remember { mutableStateOf("Album") }
+    var filename by remember { mutableStateOf("") }
     var passphrase by remember { mutableStateOf("") }
     var confirmPassphrase by remember { mutableStateOf("") }
     var showPassword by remember { mutableStateOf(false) }
@@ -1246,462 +1543,101 @@ private fun ArchiveConfigDialog(
     val extension = if (disguiseAsJpeg) ".jpg" else ".zarc"
     val isValid = filename.isNotBlank() && passphrase.length >= 4 && passphrase == confirmPassphrase
 
-    Dialog(onDismissRequest = onDismiss) {
-        Surface(
-            modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(26.dp),
-            color = MaterialTheme.colorScheme.surfaceContainerHigh,
-            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
-        ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(22.dp)
-            ) {
-                Text(
-                    text = "Archive configuration",
-                    style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold),
-                    color = MaterialTheme.colorScheme.onSurface
-                )
-                Text(
-                    text = "Encapsulating $photoCount photos with Argon2id + XChaCha20-Poly1305",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-
-                Spacer(Modifier.height(18.dp))
-
-                // Output File Name with Uneditable Extension Badge
-                Text(
-                    text = "Output file name",
-                    style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
-                    color = MaterialTheme.colorScheme.onSurface
-                )
-                Spacer(Modifier.height(6.dp))
-
-                OutlinedTextField(
-                    value = filename,
-                    onValueChange = { filename = it.replace("/", "").replace("\\", "").trim() },
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(14.dp),
-                    singleLine = true,
-                    trailingIcon = {
-                        // Uneditable extension badge pill
-                        Surface(
-                            shape = RoundedCornerShape(8.dp),
-                            color = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.padding(end = 8.dp)
-                        ) {
-                            Text(
-                                text = extension,
-                                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Black),
-                                color = MaterialTheme.colorScheme.onPrimary,
-                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-                                fontSize = 11.sp
-                            )
-                        }
-                    },
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedBorderColor = MaterialTheme.colorScheme.primary,
-                        unfocusedBorderColor = MaterialTheme.colorScheme.outlineVariant,
-                    )
-                )
-
-                Spacer(Modifier.height(14.dp))
-
-                // Encryption Passphrase
-                Text(
-                    text = "Encryption passphrase",
-                    style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
-                    color = MaterialTheme.colorScheme.onSurface
-                )
-                Spacer(Modifier.height(6.dp))
-
-                OutlinedTextField(
-                    value = passphrase,
-                    onValueChange = { passphrase = it },
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(14.dp),
-                    singleLine = true,
-                    placeholder = { Text("At least 4 characters") },
-                    visualTransformation = if (showPassword) VisualTransformation.None else PasswordVisualTransformation(),
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-                    trailingIcon = {
-                        IconButton(onClick = { showPassword = !showPassword }) {
-                            Icon(
-                                imageVector = if (showPassword) Icons.Rounded.VisibilityOff else Icons.Rounded.Visibility,
-                                contentDescription = "Toggle password visibility",
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                    },
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedBorderColor = MaterialTheme.colorScheme.primary,
-                        unfocusedBorderColor = MaterialTheme.colorScheme.outlineVariant,
-                    )
-                )
-
-                Spacer(Modifier.height(12.dp))
-
-                // Confirm Passphrase
-                Text(
-                    text = "Confirm passphrase",
-                    style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
-                    color = MaterialTheme.colorScheme.onSurface
-                )
-                Spacer(Modifier.height(6.dp))
-
-                OutlinedTextField(
-                    value = confirmPassphrase,
-                    onValueChange = { confirmPassphrase = it },
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(14.dp),
-                    singleLine = true,
-                    placeholder = { Text("Re-enter passphrase") },
-                    visualTransformation = if (showPassword) VisualTransformation.None else PasswordVisualTransformation(),
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-                    isError = confirmPassphrase.isNotEmpty() && confirmPassphrase != passphrase,
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedBorderColor = MaterialTheme.colorScheme.primary,
-                        unfocusedBorderColor = MaterialTheme.colorScheme.outlineVariant,
-                    )
-                )
-
-                if (confirmPassphrase.isNotEmpty() && confirmPassphrase != passphrase) {
-                    Text(
-                        text = "Passphrases do not match",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.error,
-                        modifier = Modifier.padding(top = 4.dp, start = 4.dp)
-                    )
-                }
-
-                Spacer(Modifier.height(22.dp))
-
-                // Actions
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.End,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    TextButton(onClick = onDismiss) {
-                        Text("Cancel")
-                    }
-                    Spacer(Modifier.width(8.dp))
-                    Button(
-                        onClick = { onConfirm(filename, passphrase) },
-                        shape = RoundedCornerShape(12.dp),
-                        enabled = isValid
-                    ) {
-                        Text("Build & save archive")
-                    }
-                }
-            }
-        }
-    }
-}
-
-// -----------------------------------------------------------------------------
-// 5. EXTRACT ARCHIVE FLOW (ROBUST DECRYPTION & VAULT GALLERY)
-// -----------------------------------------------------------------------------
-
-@Composable
-private fun ExtractArchiveFlow(
-    repository: ArchiveRepository,
-    onBack: () -> Unit,
-) {
-    val context = LocalContext.current
-    val scope = rememberCoroutineScope()
-
-    var targetUri by remember { mutableStateOf<Uri?>(null) }
-    var targetFile by remember { mutableStateOf<File?>(null) }
-    var targetFileName by remember { mutableStateOf<String?>(null) }
-    var targetFileSize by remember { mutableStateOf<Long?>(null) }
-
-    var isPolyglotJpeg by remember { mutableStateOf(false) }
-    var genuineCoverBitmap by remember { mutableStateOf<Bitmap?>(null) }
-
-    var passphrase by remember { mutableStateOf("") }
-    var showPassword by remember { mutableStateOf(false) }
-    var isAuthenticating by remember { mutableStateOf(false) }
-    var authError by remember { mutableStateOf<String?>(null) }
-
-    var decryptedManifest by remember { mutableStateOf<ArchiveManifestData?>(null) }
-
-    val filePickerLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.OpenDocument()
-    ) { uri ->
-        if (uri != null) {
-            targetUri = uri
-            val name = queryFileName(context, uri) ?: "Archive"
-            targetFileName = name
-            targetFileSize = queryFileSize(context, uri)
-            authError = null
-            genuineCoverBitmap = null
-
-            scope.launch {
-                withContext(Dispatchers.IO) {
-                    val localCache = File(context.cacheDir, "temp_extract_${System.currentTimeMillis()}.${if (name.endsWith(".jpg", ignoreCase = true)) "jpg" else "zarc"}")
-                    context.contentResolver.openInputStream(uri)?.use { inStream ->
-                        localCache.outputStream().use { outStream ->
-                            inStream.copyTo(outStream)
-                        }
-                    }
-                    targetFile = localCache
-
-                    // Inspect if this is a genuine polyglot JPEG
-                    val coverResult = repository.readOuterCover(localCache)
-                    coverResult.onSuccess { bytes ->
-                        if (bytes != null && bytes.isNotEmpty()) {
-                            isPolyglotJpeg = true
-                            genuineCoverBitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-                        } else {
-                            isPolyglotJpeg = false
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // When manifest is unlocked, display full Zarc Vault Gallery UI
-    if (decryptedManifest != null && targetFile != null) {
-        DecryptedGalleryViewer(
-            manifest = decryptedManifest!!,
-            archiveFile = targetFile!!,
-            repository = repository,
-            passphrase = passphrase,
-            onClose = {
-                decryptedManifest = null
-                passphrase = ""
-            }
-        )
-        return
-    }
-
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(bottom = 36.dp)
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false)
     ) {
-        // Top App Bar
-        Row(
+        Box(
             modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 8.dp, vertical = 12.dp),
-            verticalAlignment = Alignment.CenterVertically
+                .fillMaxSize()
+                .imePadding()
+                .padding(horizontal = 20.dp),
+            contentAlignment = Alignment.Center
         ) {
-            IconButton(onClick = onBack) {
-                Icon(
-                    imageVector = ZarcIcons.Back,
-                    contentDescription = "Back",
-                    tint = MaterialTheme.colorScheme.onSurface
-                )
-            }
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = "Extract Zarc archive",
-                    style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.SemiBold),
-                    color = MaterialTheme.colorScheme.onSurface,
-                )
-                Text(
-                    text = "Open, inspect, and extract .jpg or .zarc containers",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-        }
-
-        Spacer(Modifier.height(14.dp))
-
-        // Step 1: File Selection
-        if (targetUri == null) {
             Surface(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 16.dp),
-                shape = RoundedCornerShape(22.dp),
-                color = MaterialTheme.colorScheme.surfaceContainer,
+                    .verticalScroll(rememberScrollState()),
+                shape = RoundedCornerShape(26.dp),
+                color = MaterialTheme.colorScheme.surfaceContainerHigh,
                 border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
             ) {
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(28.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .size(60.dp)
-                            .clip(CircleShape)
-                            .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            imageVector = ZarcIcons.Lock,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.size(30.dp)
-                        )
-                    }
-
-                    Spacer(Modifier.height(16.dp))
-
-                    Text(
-                        text = "Select archive (.jpg or .zarc)",
-                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
-                        color = MaterialTheme.colorScheme.onSurface,
-                        textAlign = TextAlign.Center
-                    )
-
-                    Spacer(Modifier.height(6.dp))
-
-                    Text(
-                        text = "Choose an Album.jpg disguised photo or a standalone .zarc file from storage.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        textAlign = TextAlign.Center,
-                        lineHeight = 16.sp
-                    )
-
-                    Spacer(Modifier.height(20.dp))
-
-                    Button(
-                        onClick = { filePickerLauncher.launch(arrayOf("*/*")) },
-                        shape = RoundedCornerShape(14.dp),
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = MaterialTheme.colorScheme.primary,
-                            contentColor = MaterialTheme.colorScheme.onPrimary
-                        )
-                    ) {
-                        Icon(ZarcIcons.Import, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Spacer(Modifier.width(8.dp))
-                        Text("Select .jpg / .zarc file")
-                    }
-                }
-            }
-        } else {
-            // Selected File Card
-            Surface(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp),
-                shape = RoundedCornerShape(20.dp),
-                color = MaterialTheme.colorScheme.surfaceContainer,
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
-            ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(18.dp)
-                ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = targetFileName ?: "Archive file",
-                                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
-                                color = MaterialTheme.colorScheme.onSurface,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                            Text(
-                                text = "${formatBytes(targetFileSize ?: 0)} · ${if (isPolyglotJpeg) "Disguised JPEG container" else "Native ZARC file"}",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-
-                        TextButton(onClick = {
-                            targetUri = null
-                            targetFile?.delete()
-                            targetFile = null
-                            authError = null
-                            genuineCoverBitmap = null
-                        }) {
-                            Text("Change")
-                        }
-                    }
-
-                    // Zero-Knowledge Outer Cover Preview (Visible without password!)
-                    if (genuineCoverBitmap != null) {
-                        Spacer(Modifier.height(14.dp))
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(160.dp)
-                                .clip(RoundedCornerShape(14.dp))
-                                .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(14.dp))
-                        ) {
-                            Image(
-                                bitmap = genuineCoverBitmap!!.asImageBitmap(),
-                                contentDescription = "Outer cover",
-                                modifier = Modifier.fillMaxSize(),
-                                contentScale = ContentScale.Crop
-                            )
-
-                            Surface(
-                                shape = RoundedCornerShape(bottomStart = 8.dp),
-                                color = ZarcPalette.verified.copy(alpha = 0.90f),
-                                modifier = Modifier.align(Alignment.TopEnd)
-                            ) {
-                                Text(
-                                    text = "GENUINE COVER PREVIEW (UNENCRYPTED)",
-                                    style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Black),
-                                    color = Color.Black,
-                                    fontSize = 8.sp,
-                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp)
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-
-            Spacer(Modifier.height(18.dp))
-
-            // Step 2: Passphrase Authentication Card
-            Surface(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp),
-                shape = RoundedCornerShape(20.dp),
-                color = MaterialTheme.colorScheme.surfaceContainer,
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
-            ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(18.dp)
+                        .padding(22.dp)
                 ) {
                     Text(
-                        text = "Master passphrase",
-                        style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
+                        text = "Archive configuration",
+                        style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold),
                         color = MaterialTheme.colorScheme.onSurface
                     )
-                    Spacer(Modifier.height(4.dp))
                     Text(
-                        text = "Enter encryption key to unlock manifest and photos",
+                        text = "Encapsulating $photoCount photos with Argon2id + XChaCha20-Poly1305",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
 
-                    Spacer(Modifier.height(14.dp))
+                    Spacer(Modifier.height(18.dp))
+
+                    // Output File Name with Uneditable Extension Badge
+                    Text(
+                        text = "Output file name",
+                        style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Spacer(Modifier.height(6.dp))
 
                     OutlinedTextField(
-                        value = passphrase,
-                        onValueChange = {
-                            passphrase = it
-                            authError = null
-                        },
+                        value = filename,
+                        onValueChange = { filename = it.replace("/", "").replace("\\", "").trim() },
                         modifier = Modifier.fillMaxWidth(),
                         shape = RoundedCornerShape(14.dp),
                         singleLine = true,
-                        placeholder = { Text("Enter passphrase") },
+                        placeholder = {
+                            Text(
+                                text = "e.g. Vacation_2026",
+                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                            )
+                        },
+                        trailingIcon = {
+                            Surface(
+                                shape = RoundedCornerShape(8.dp),
+                                color = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.padding(end = 8.dp)
+                            ) {
+                                Text(
+                                    text = extension,
+                                    style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Black),
+                                    color = MaterialTheme.colorScheme.onPrimary,
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                                    fontSize = 11.sp
+                                )
+                            }
+                        },
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = MaterialTheme.colorScheme.primary,
+                            unfocusedBorderColor = MaterialTheme.colorScheme.outlineVariant,
+                        )
+                    )
+
+                    Spacer(Modifier.height(14.dp))
+
+                    // Encryption Passphrase
+                    Text(
+                        text = "Encryption passphrase",
+                        style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Spacer(Modifier.height(6.dp))
+
+                    OutlinedTextField(
+                        value = passphrase,
+                        onValueChange = { passphrase = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(14.dp),
+                        singleLine = true,
+                        placeholder = { Text("At least 4 characters") },
                         visualTransformation = if (showPassword) VisualTransformation.None else PasswordVisualTransformation(),
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
                         trailingIcon = {
@@ -1719,86 +1655,83 @@ private fun ExtractArchiveFlow(
                         )
                     )
 
-                    // Error Handling Feedback
-                    if (authError != null) {
-                        Spacer(Modifier.height(10.dp))
-                        Surface(
-                            shape = RoundedCornerShape(10.dp),
-                            color = MaterialTheme.colorScheme.error.copy(alpha = 0.12f),
-                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.35f))
-                        ) {
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(10.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                Text(
-                                    text = "✕",
-                                    color = MaterialTheme.colorScheme.error,
-                                    fontWeight = FontWeight.Bold
-                                )
-                                Text(
-                                    text = authError!!,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.error,
-                                    lineHeight = 15.sp
-                                )
-                            }
-                        }
+                    Spacer(Modifier.height(12.dp))
+
+                    // Confirm Passphrase
+                    Text(
+                        text = "Confirm passphrase",
+                        style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Spacer(Modifier.height(6.dp))
+
+                    OutlinedTextField(
+                        value = confirmPassphrase,
+                        onValueChange = { confirmPassphrase = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(14.dp),
+                        singleLine = true,
+                        placeholder = { Text("Re-enter passphrase") },
+                        visualTransformation = if (showPassword) VisualTransformation.None else PasswordVisualTransformation(),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                        isError = confirmPassphrase.isNotEmpty() && confirmPassphrase != passphrase,
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = MaterialTheme.colorScheme.primary,
+                            unfocusedBorderColor = MaterialTheme.colorScheme.outlineVariant,
+                        )
+                    )
+
+                    if (confirmPassphrase.isNotEmpty() && confirmPassphrase != passphrase) {
+                        Text(
+                            text = "Passphrases do not match",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.padding(top = 4.dp, start = 4.dp)
+                        )
                     }
 
-                    Spacer(Modifier.height(18.dp))
+                    Spacer(Modifier.height(24.dp))
 
-                    Button(
-                        onClick = {
-                            isAuthenticating = true
-                            authError = null
-
-                            scope.launch {
-                                val result = repository.readManifest(targetFile!!, passphrase)
-                                result.fold(
-                                    onSuccess = { manifest ->
-                                        isAuthenticating = false
-                                        decryptedManifest = manifest
-                                    },
-                                    onFailure = { error ->
-                                        isAuthenticating = false
-                                        val msg = error.message ?: "Authentication failed"
-                                        authError = when {
-                                            msg.contains("authentication tag mismatch", ignoreCase = true) ||
-                                            msg.contains("crypto error", ignoreCase = true) -> "Incorrect passphrase or tampered archive ciphertext."
-                                            msg.contains("magic", ignoreCase = true) ||
-                                            msg.contains("no zarc container", ignoreCase = true) -> "Not a valid Zarc container file."
-                                            msg.contains("truncated", ignoreCase = true) ||
-                                            msg.contains("unexpected eof", ignoreCase = true) -> "Archive file is truncated or incomplete."
-                                            else -> "Authentication failed: $msg"
-                                        }
-                                    }
-                                )
-                            }
-                        },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(50.dp),
-                        shape = RoundedCornerShape(14.dp),
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = MaterialTheme.colorScheme.primary,
-                            contentColor = MaterialTheme.colorScheme.onPrimary
-                        ),
-                        enabled = passphrase.isNotBlank() && !isAuthenticating && targetFile != null
+                    // Full-Width Hallmark Action Button
+                    Column(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        if (isAuthenticating) {
-                            CircularProgressIndicator(
-                                modifier = Modifier.size(20.dp),
-                                color = MaterialTheme.colorScheme.onPrimary,
-                                strokeWidth = 2.dp
+                        Button(
+                            onClick = { onConfirm(filename.trim(), passphrase) },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(52.dp),
+                            shape = RoundedCornerShape(16.dp),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = MaterialTheme.colorScheme.primary,
+                                contentColor = MaterialTheme.colorScheme.onPrimary
+                            ),
+                            enabled = isValid
+                        ) {
+                            Icon(
+                                imageVector = ZarcIcons.Download,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp)
                             )
-                            Spacer(Modifier.width(10.dp))
-                            Text("Decrypting manifest...")
-                        } else {
-                            Text("Unlock & decrypt archive", fontWeight = FontWeight.Bold)
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                text = "Build & Save Container",
+                                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold)
+                            )
+                        }
+
+                        TextButton(
+                            onClick = onDismiss,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(44.dp)
+                        ) {
+                            Text(
+                                text = "Cancel",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
                         }
                     }
                 }
@@ -1808,7 +1741,486 @@ private fun ExtractArchiveFlow(
 }
 
 // -----------------------------------------------------------------------------
-// 6. DECRYPTED ZARC VAULT GALLERY UI (MULTI-COLUMN GRID & THUMBNAILS)
+// 6. EXTRACT ARCHIVE FLOW
+// -----------------------------------------------------------------------------
+
+@Composable
+private fun ExtractArchiveFlow(
+    repository: ArchiveRepository,
+    onBack: () -> Unit,
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+
+    var targetUri by remember { mutableStateOf<Uri?>(null) }
+    var targetFile by remember { mutableStateOf<File?>(null) }
+    var targetFileName by remember { mutableStateOf<String?>(null) }
+    var targetFileSize by remember { mutableStateOf<Long?>(null) }
+    var isPolyglotJpeg by remember { mutableStateOf(false) }
+
+    var genuineCoverBitmap by remember { mutableStateOf<Bitmap?>(null) }
+    var showCoverPreviewModal by remember { mutableStateOf(false) }
+
+    var passphrase by remember { mutableStateOf("") }
+    var showPassword by remember { mutableStateOf(false) }
+    var isAuthenticating by remember { mutableStateOf(false) }
+    var authError by remember { mutableStateOf<String?>(null) }
+
+    var decryptedManifest by remember { mutableStateOf<ArchiveManifestData?>(null) }
+
+    // SAF Picker for selecting archive (.jpg or .zarc)
+    val filePickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            targetUri = uri
+            val name = queryFileName(context, uri) ?: "Archive.jpg"
+            val size = queryFileSize(context, uri)
+            targetFileName = name
+            targetFileSize = size
+            authError = null
+            passphrase = ""
+            decryptedManifest = null
+            genuineCoverBitmap = null
+
+            // Stream SAF URI to temporary cache file for Rust JNI access
+            scope.launch {
+                val tempCacheFile = File(context.cacheDir, "inspect_${System.currentTimeMillis()}.tmp")
+                withContext(Dispatchers.IO) {
+                    context.contentResolver.openInputStream(uri)?.use { inStream ->
+                        FileOutputStream(tempCacheFile).use { outStream ->
+                            inStream.copyTo(outStream)
+                        }
+                    }
+                }
+                targetFile = tempCacheFile
+
+                // Inspect for genuine outer cover JPEG without password
+                val coverRes = repository.readOuterCover(tempCacheFile)
+                coverRes.onSuccess { coverBytes ->
+                    if (coverBytes != null && coverBytes.isNotEmpty()) {
+                        isPolyglotJpeg = true
+                        genuineCoverBitmap = BitmapFactory.decodeByteArray(coverBytes, 0, coverBytes.size)
+                    } else {
+                        isPolyglotJpeg = false
+                        genuineCoverBitmap = null
+                    }
+                }
+            }
+        }
+    }
+
+    if (decryptedManifest != null && targetFile != null) {
+        // Vault Gallery View for decrypted archive
+        DecryptedGalleryViewer(
+            manifest = decryptedManifest!!,
+            archiveFile = targetFile!!,
+            repository = repository,
+            passphrase = passphrase,
+            onClose = {
+                decryptedManifest = null
+            }
+        )
+    } else {
+        // Extraction Launcher & Password Prompt Screen
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .imePadding()
+                .navigationBarsPadding()
+                .padding(bottom = 32.dp)
+        ) {
+            // Top App Bar
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 8.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                IconButton(onClick = onBack) {
+                    Icon(
+                        imageVector = ZarcIcons.Back,
+                        contentDescription = "Back",
+                        tint = MaterialTheme.colorScheme.onSurface
+                    )
+                }
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Extract Zarc archive",
+                        style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.SemiBold),
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                    Text(
+                        text = "Open, inspect, and extract .jpg or .zarc containers",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+
+            Spacer(Modifier.height(16.dp))
+
+            if (targetFile == null) {
+                // File Selection Dropzone
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp),
+                    shape = RoundedCornerShape(22.dp),
+                    color = MaterialTheme.colorScheme.surfaceContainer,
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(28.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(60.dp)
+                                .clip(CircleShape)
+                                .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = ZarcIcons.Lock,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(30.dp)
+                            )
+                        }
+
+                        Spacer(Modifier.height(16.dp))
+
+                        Text(
+                            text = "Select archive (.jpg or .zarc)",
+                            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                            color = MaterialTheme.colorScheme.onSurface,
+                            textAlign = TextAlign.Center
+                        )
+
+                        Spacer(Modifier.height(6.dp))
+
+                        Text(
+                            text = "Choose a disguised photo (.jpg) or a standalone .zarc file from storage.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            textAlign = TextAlign.Center,
+                            lineHeight = 16.sp
+                        )
+
+                        Spacer(Modifier.height(20.dp))
+
+                        Button(
+                            onClick = { filePickerLauncher.launch(arrayOf("*/*")) },
+                            shape = RoundedCornerShape(14.dp),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = MaterialTheme.colorScheme.primary,
+                                contentColor = MaterialTheme.colorScheme.onPrimary
+                            )
+                        ) {
+                            Icon(ZarcIcons.Import, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(8.dp))
+                            Text("Select .jpg / .zarc file")
+                        }
+                    }
+                }
+            } else {
+                // Selected File Card
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp),
+                    shape = RoundedCornerShape(20.dp),
+                    color = MaterialTheme.colorScheme.surfaceContainer,
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(18.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = targetFileName ?: "Archive file",
+                                    style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Text(
+                                    text = "${formatBytes(targetFileSize ?: 0)} · ${if (isPolyglotJpeg) "Disguised JPEG container" else "Native ZARC file"}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+
+                            TextButton(onClick = {
+                                targetUri = null
+                                targetFile?.delete()
+                                targetFile = null
+                                authError = null
+                                genuineCoverBitmap = null
+                            }) {
+                                Text("Change")
+                            }
+                        }
+
+                        // Zero-Knowledge Outer Cover Preview (Tappable for large preview!)
+                        if (genuineCoverBitmap != null) {
+                            Spacer(Modifier.height(14.dp))
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(170.dp)
+                                    .clip(RoundedCornerShape(14.dp))
+                                    .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(14.dp))
+                                    .clickable { showCoverPreviewModal = true }
+                            ) {
+                                Image(
+                                    bitmap = genuineCoverBitmap!!.asImageBitmap(),
+                                    contentDescription = "Outer cover",
+                                    modifier = Modifier.fillMaxSize(),
+                                    contentScale = ContentScale.Crop
+                                )
+
+                                Surface(
+                                    shape = RoundedCornerShape(bottomStart = 8.dp),
+                                    color = ZarcPalette.verified.copy(alpha = 0.90f),
+                                    modifier = Modifier.align(Alignment.TopEnd)
+                                ) {
+                                    Text(
+                                        text = "UNENCRYPTED COVER (GENUINE JPEG)",
+                                        style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Black),
+                                        color = Color.White,
+                                        fontSize = 8.sp,
+                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp)
+                                    )
+                                }
+
+                                Surface(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .align(Alignment.BottomCenter),
+                                    color = Color.Black.copy(alpha = 0.65f)
+                                ) {
+                                    Text(
+                                        text = "Tap to inspect full cover photo",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = Color.White,
+                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                                        textAlign = TextAlign.Center
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Spacer(Modifier.height(18.dp))
+
+                // Passphrase & Decrypt Prompt
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp),
+                    shape = RoundedCornerShape(20.dp),
+                    color = MaterialTheme.colorScheme.surfaceContainer,
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(18.dp)
+                    ) {
+                        Text(
+                            text = "Archive passphrase",
+                            style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Text(
+                            text = "Enter master passphrase to authenticate and open gallery",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+
+                        Spacer(Modifier.height(14.dp))
+
+                        OutlinedTextField(
+                            value = passphrase,
+                            onValueChange = {
+                                passphrase = it
+                                authError = null
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(14.dp),
+                            singleLine = true,
+                            placeholder = { Text("Enter passphrase") },
+                            visualTransformation = if (showPassword) VisualTransformation.None else PasswordVisualTransformation(),
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                            trailingIcon = {
+                                IconButton(onClick = { showPassword = !showPassword }) {
+                                    Icon(
+                                        imageVector = if (showPassword) Icons.Rounded.VisibilityOff else Icons.Rounded.Visibility,
+                                        contentDescription = "Toggle password visibility",
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            },
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedBorderColor = MaterialTheme.colorScheme.primary,
+                                unfocusedBorderColor = MaterialTheme.colorScheme.outlineVariant,
+                            )
+                        )
+
+                        // Error Handling Feedback
+                        if (authError != null) {
+                            Spacer(Modifier.height(10.dp))
+                            Surface(
+                                shape = RoundedCornerShape(10.dp),
+                                color = MaterialTheme.colorScheme.error.copy(alpha = 0.12f),
+                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.35f))
+                            ) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(10.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Text(
+                                        text = "✕",
+                                        color = MaterialTheme.colorScheme.error,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                    Text(
+                                        text = authError!!,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.error,
+                                        lineHeight = 15.sp
+                                    )
+                                }
+                            }
+                        }
+
+                        Spacer(Modifier.height(18.dp))
+
+                        Button(
+                            onClick = {
+                                isAuthenticating = true
+                                authError = null
+
+                                scope.launch {
+                                    val result = repository.readManifest(targetFile!!, passphrase)
+                                    result.fold(
+                                        onSuccess = { manifest ->
+                                            isAuthenticating = false
+                                            decryptedManifest = manifest
+                                        },
+                                        onFailure = { error ->
+                                            isAuthenticating = false
+                                            val msg = error.message ?: "Authentication failed"
+                                            authError = when {
+                                                msg.contains("authentication tag mismatch", ignoreCase = true) ||
+                                                msg.contains("crypto error", ignoreCase = true) -> "Incorrect passphrase or tampered archive ciphertext."
+                                                msg.contains("magic", ignoreCase = true) ||
+                                                msg.contains("no zarc container", ignoreCase = true) -> "Not a valid Zarc container file."
+                                                msg.contains("truncated", ignoreCase = true) ||
+                                                msg.contains("unexpected eof", ignoreCase = true) -> "Archive file is truncated or incomplete."
+                                                else -> "Authentication failed: $msg"
+                                            }
+                                        }
+                                    )
+                                }
+                            },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(48.dp),
+                            shape = RoundedCornerShape(14.dp),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = MaterialTheme.colorScheme.primary,
+                                contentColor = MaterialTheme.colorScheme.onPrimary
+                            ),
+                            enabled = !isAuthenticating && passphrase.isNotEmpty()
+                        ) {
+                            if (isAuthenticating) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(18.dp),
+                                    color = MaterialTheme.colorScheme.onPrimary,
+                                    strokeWidth = 2.dp
+                                )
+                                Spacer(Modifier.width(8.dp))
+                                Text("Verifying authenticity...", style = MaterialTheme.typography.labelMedium)
+                            } else {
+                                Icon(imageVector = ZarcIcons.Lock, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(Modifier.width(8.dp))
+                                Text("Unlock & Open Gallery", style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold))
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Cover Photo Preview Dialog
+    if (showCoverPreviewModal && genuineCoverBitmap != null) {
+        Dialog(
+            onDismissRequest = { showCoverPreviewModal = false },
+            properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false)
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black)
+            ) {
+                Image(
+                    bitmap = genuineCoverBitmap!!.asImageBitmap(),
+                    contentDescription = "Cover preview",
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = ContentScale.Fit
+                )
+
+                // Top Bar
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .align(Alignment.TopCenter)
+                        .statusBarsPadding()
+                        .background(Brush.verticalGradient(listOf(Color.Black.copy(alpha = 0.85f), Color.Transparent)))
+                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    IconButton(onClick = { showCoverPreviewModal = false }) {
+                        Icon(imageVector = ZarcIcons.Back, contentDescription = "Close", tint = Color.White)
+                    }
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = targetFileName ?: "Disguised Cover",
+                            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                            color = Color.White
+                        )
+                        Text(
+                            text = "Genuine JPEG outer cover photo",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Color.White.copy(alpha = 0.75f)
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+// -----------------------------------------------------------------------------
+// 7. DECRYPTED GALLERY VIEWER (GRID VIEW)
 // -----------------------------------------------------------------------------
 
 @Composable
@@ -1825,7 +2237,7 @@ private fun DecryptedGalleryViewer(
     var activeViewerIndex by remember { mutableStateOf<Int?>(null) }
     var isExtractingAll by remember { mutableStateOf(false) }
 
-    // Launcher for "Extract All" (User picks destination directory via SAF OpenDocumentTree)
+    // Launcher for "Extract All"
     val extractAllTreeLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocumentTree()
     ) { treeUri ->
@@ -1913,6 +2325,8 @@ private fun DecryptedGalleryViewer(
                         strokeWidth = 2.dp
                     )
                 } else {
+                    Icon(ZarcIcons.Download, contentDescription = null, modifier = Modifier.size(14.dp))
+                    Spacer(Modifier.width(4.dp))
                     Text("Extract all", style = MaterialTheme.typography.labelMedium)
                 }
             }
@@ -1925,9 +2339,9 @@ private fun DecryptedGalleryViewer(
             columns = GridCells.Fixed(3),
             modifier = Modifier
                 .fillMaxSize()
-                .padding(4.dp),
-            horizontalArrangement = Arrangement.spacedBy(4.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp)
+                .padding(2.dp),
+            horizontalArrangement = Arrangement.spacedBy(2.dp),
+            verticalArrangement = Arrangement.spacedBy(2.dp)
         ) {
             itemsIndexed(manifest.objects) { index, obj ->
                 var thumbBitmap by remember(obj.id) { mutableStateOf<Bitmap?>(null) }
@@ -1940,7 +2354,7 @@ private fun DecryptedGalleryViewer(
                 Box(
                     modifier = Modifier
                         .aspectRatio(1f)
-                        .clip(RoundedCornerShape(8.dp))
+                        .clip(RoundedCornerShape(4.dp))
                         .background(MaterialTheme.colorScheme.surfaceContainerHighest)
                         .clickable { activeViewerIndex = index }
                 ) {
@@ -1957,19 +2371,19 @@ private fun DecryptedGalleryViewer(
                             contentAlignment = Alignment.Center
                         ) {
                             CircularProgressIndicator(
-                                modifier = Modifier.size(20.dp),
+                                modifier = Modifier.size(18.dp),
                                 strokeWidth = 2.dp,
                                 color = MaterialTheme.colorScheme.primary
                             )
                         }
                     }
 
-                    // Bottom file info badge
+                    // Bottom subtle file info badge
                     Surface(
                         modifier = Modifier
                             .fillMaxWidth()
                             .align(Alignment.BottomCenter),
-                        color = Color.Black.copy(alpha = 0.60f)
+                        color = Color.Black.copy(alpha = 0.55f)
                     ) {
                         Text(
                             text = obj.originalName,
@@ -1986,7 +2400,7 @@ private fun DecryptedGalleryViewer(
         }
     }
 
-    // Interactive Full-Screen Media Viewer with Mini-Roll Filmstrip
+    // Full-Screen Gallery Viewer with HorizontalPager Swipe & Mini-Roll
     if (activeViewerIndex != null) {
         DecryptedPhotoViewer(
             manifest = manifest,
@@ -2000,7 +2414,7 @@ private fun DecryptedGalleryViewer(
 }
 
 // -----------------------------------------------------------------------------
-// 7. FULL-SCREEN MEDIA VIEWER WITH MINI-ROLL FILMSTRIP & ZOOM/PAN
+// 8. FULL-SCREEN GALLERY VIEWER WITH HORIZONTAL PAGER & MINI-ROLL
 // -----------------------------------------------------------------------------
 
 @Composable
@@ -2015,35 +2429,14 @@ private fun DecryptedPhotoViewer(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
-    var currentIndex by remember { mutableIntStateOf(initialIndex) }
-    val currentObject = manifest.objects.getOrNull(currentIndex) ?: return
+    val pagerState = rememberPagerState(initialPage = initialIndex) { manifest.objects.size }
+    val currentObject = manifest.objects.getOrNull(pagerState.currentPage) ?: return
 
-    var currentBitmap by remember { mutableStateOf<Bitmap?>(null) }
-    var isLoadingHighRes by remember { mutableStateOf(true) }
+    var chromeVisible by remember { mutableStateOf(true) }
+    var showInfoSheet by remember { mutableStateOf(false) }
 
-    var scale by remember { mutableStateOf(1f) }
-    var offsetX by remember { mutableStateOf(0f) }
-    var offsetY by remember { mutableStateOf(0f) }
-
-    var showInfoModal by remember { mutableStateOf(false) }
-
-    // Load full-resolution image on index change
-    LaunchedEffect(currentIndex) {
-        isLoadingHighRes = true
-        scale = 1f
-        offsetX = 0f
-        offsetY = 0f
-        val result = repository.extractEntryToBitmap(archiveFile, passphrase, currentObject.id, maxDimension = 2048)
-        result.fold(
-            onSuccess = { bmp ->
-                currentBitmap = bmp
-                isLoadingHighRes = false
-            },
-            onFailure = {
-                isLoadingHighRes = false
-            }
-        )
-    }
+    // In-memory cache for decrypted bitmaps during viewing session
+    val bitmapCache = remember { mutableMapOf<String, Bitmap>() }
 
     // Single Photo Extract Launcher
     val saveSingleDocLauncher = rememberLauncherForActivityResult(
@@ -2076,163 +2469,241 @@ private fun DecryptedPhotoViewer(
             .fillMaxSize()
             .background(Color.Black)
     ) {
-        // Zoomable & Pannable High-Res Photo Viewport
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .pointerInput(currentIndex) {
-                    detectTransformGestures { _, pan, zoom, _ ->
-                        scale = (scale * zoom).coerceIn(1f, 5f)
-                        if (scale > 1f) {
-                            offsetX += pan.x
-                            offsetY += pan.y
-                        } else {
-                            offsetX = 0f
-                            offsetY = 0f
-                        }
+        // HorizontalPager for natural swipe to next/prev with Compose physics
+        HorizontalPager(
+            state = pagerState,
+            key = { manifest.objects[it].id },
+            modifier = Modifier.fillMaxSize()
+        ) { page ->
+            val obj = manifest.objects[page]
+            var pageBitmap by remember(obj.id) { mutableStateOf(bitmapCache[obj.id]) }
+            var isDecoding by remember(obj.id) { mutableStateOf(pageBitmap == null) }
+
+            LaunchedEffect(obj.id) {
+                if (pageBitmap == null) {
+                    val res = repository.extractEntryToBitmap(archiveFile, passphrase, obj.id, maxDimension = 2048)
+                    res.onSuccess { bmp ->
+                        bitmapCache[obj.id] = bmp
+                        pageBitmap = bmp
                     }
-                },
-            contentAlignment = Alignment.Center
-        ) {
-            if (currentBitmap != null) {
-                Image(
-                    bitmap = currentBitmap!!.asImageBitmap(),
-                    contentDescription = currentObject.originalName,
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .graphicsLayer(
-                            scaleX = scale,
-                            scaleY = scale,
-                            translationX = offsetX,
-                            translationY = offsetY
-                        ),
-                    contentScale = ContentScale.Fit
-                )
-            } else if (isLoadingHighRes) {
-                CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
+                    isDecoding = false
+                }
+            }
+
+            var scale by remember { mutableStateOf(1f) }
+            var offsetX by remember { mutableStateOf(0f) }
+            var offsetY by remember { mutableStateOf(0f) }
+
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .pointerInput(Unit) {
+                        detectTapGestures(
+                            onDoubleTap = {
+                                scale = if (scale > 1f) 1f else 2.5f
+                                offsetX = 0f
+                                offsetY = 0f
+                            },
+                            onTap = {
+                                chromeVisible = !chromeVisible
+                            }
+                        )
+                    }
+                    .pointerInput(page) {
+                        detectTransformGestures { _, pan, zoom, _ ->
+                            scale = (scale * zoom).coerceIn(1f, 5f)
+                            if (scale > 1f) {
+                                offsetX += pan.x
+                                offsetY += pan.y
+                            } else {
+                                offsetX = 0f
+                                offsetY = 0f
+                            }
+                        }
+                    },
+                contentAlignment = Alignment.Center
+            ) {
+                if (pageBitmap != null) {
+                    Image(
+                        bitmap = pageBitmap!!.asImageBitmap(),
+                        contentDescription = obj.originalName,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .graphicsLayer(
+                                scaleX = scale,
+                                scaleY = scale,
+                                translationX = offsetX,
+                                translationY = offsetY
+                            ),
+                        contentScale = ContentScale.Fit
+                    )
+                } else if (isDecoding) {
+                    CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
+                }
             }
         }
 
-        // Top Controls Bar (Dismiss, Index, Info)
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .align(Alignment.TopCenter)
-                .background(Color.Black.copy(alpha = 0.65f))
-                .padding(horizontal = 12.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically
+        // Top App Bar (Fade & Slide with Chrome visibility)
+        AnimatedVisibility(
+            visible = chromeVisible,
+            modifier = Modifier.align(Alignment.TopCenter),
+            enter = fadeIn() + slideInVertically { -it },
+            exit = fadeOut() + slideOutVertically { -it },
         ) {
-            IconButton(onClick = onClose) {
-                Text("✕", color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold)
-            }
-
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = currentObject.originalName,
-                    style = MaterialTheme.typography.titleSmall,
-                    color = Color.White,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-                Text(
-                    text = "${currentIndex + 1} of ${manifest.objects.size}",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = Color.White.copy(alpha = 0.7f)
-                )
-            }
-
-            IconButton(onClick = { showInfoModal = true }) {
-                Icon(
-                    imageVector = ZarcIcons.Settings,
-                    contentDescription = "Info",
-                    tint = Color.White
-                )
-            }
-        }
-
-        // Bottom Controls: Single Photo Extract & Mini-Roll Filmstrip
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .align(Alignment.BottomCenter)
-                .background(Color.Black.copy(alpha = 0.75f))
-                .padding(vertical = 10.dp)
-        ) {
-            // Action button: Extract this photo
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 4.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
+                    .background(
+                        Brush.verticalGradient(
+                            listOf(Color.Black.copy(alpha = 0.85f), Color.Transparent)
+                        )
+                    )
+                    .statusBarsPadding()
+                    .padding(horizontal = 8.dp, vertical = 6.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text(
-                    text = formatBytes(currentObject.originalSize),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = Color.White.copy(alpha = 0.75f)
-                )
+                IconButton(onClick = onClose) {
+                    Icon(imageVector = ZarcIcons.Back, contentDescription = "Close", tint = Color.White)
+                }
 
-                Button(
-                    onClick = { saveSingleDocLauncher.launch(currentObject.originalName) },
-                    shape = RoundedCornerShape(12.dp),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = MaterialTheme.colorScheme.primary,
-                        contentColor = MaterialTheme.colorScheme.onPrimary
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = currentObject.originalName,
+                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold),
+                        color = Color.White,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
-                ) {
-                    Icon(ZarcIcons.Import, contentDescription = null, modifier = Modifier.size(16.dp))
-                    Spacer(Modifier.width(6.dp))
-                    Text("Extract photo", style = MaterialTheme.typography.labelMedium)
+                    Text(
+                        text = "${pagerState.currentPage + 1} of ${manifest.objects.size} · ${formatBytes(currentObject.sanitizedSize)}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color.White.copy(alpha = 0.75f)
+                    )
+                }
+
+                IconButton(onClick = { showInfoSheet = true }) {
+                    Icon(imageVector = ZarcIcons.Info, contentDescription = "Details", tint = Color.White)
+                }
+
+                IconButton(onClick = { saveSingleDocLauncher.launch(currentObject.originalName) }) {
+                    Icon(imageVector = ZarcIcons.Download, contentDescription = "Extract", tint = Color.White)
                 }
             }
+        }
 
-            Spacer(Modifier.height(8.dp))
-
-            // Mini-Roll Filmstrip (Interactive horizontal thumbnail reel)
-            val listState = rememberLazyListState()
-
-            LaunchedEffect(currentIndex) {
-                listState.animateScrollToItem(currentIndex)
-            }
-
-            LazyRow(
-                state = listState,
-                contentPadding = PaddingValues(horizontal = 16.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                modifier = Modifier.fillMaxWidth()
+        // Bottom Filmstrip MiniRoll & Quick Action Bar (Fade & Slide with Chrome visibility)
+        AnimatedVisibility(
+            visible = chromeVisible,
+            modifier = Modifier.align(Alignment.BottomCenter),
+            enter = fadeIn() + slideInVertically { it },
+            exit = fadeOut() + slideOutVertically { it },
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(
+                        Brush.verticalGradient(
+                            listOf(Color.Transparent, Color.Black.copy(alpha = 0.90f))
+                        )
+                    )
+                    .navigationBarsPadding()
+                    .padding(bottom = 8.dp)
             ) {
-                itemsIndexed(manifest.objects) { index, obj ->
-                    val isSelected = (index == currentIndex)
-                    var miniThumb by remember(obj.id) { mutableStateOf<Bitmap?>(null) }
+                // Interactive MiniRoll (Samsung / Apple Gallery style)
+                if (manifest.objects.size > 1) {
+                    val filmstripState = rememberLazyListState()
 
-                    LaunchedEffect(obj.id) {
-                        val res = repository.extractEntryToBitmap(archiveFile, passphrase, obj.id, maxDimension = 120)
-                        res.onSuccess { bmp -> miniThumb = bmp }
+                    LaunchedEffect(pagerState.currentPage) {
+                        filmstripState.animateScrollToItem(maxOf(0, pagerState.currentPage - 2))
                     }
 
-                    Box(
+                    LazyRow(
+                        state = filmstripState,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        contentPadding = PaddingValues(horizontal = 16.dp),
+                        verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier
-                            .size(54.dp)
-                            .clip(RoundedCornerShape(8.dp))
-                            .border(
-                                width = if (isSelected) 2.5.dp else 1.dp,
-                                color = if (isSelected) MaterialTheme.colorScheme.primary else Color.White.copy(alpha = 0.25f),
-                                shape = RoundedCornerShape(8.dp)
-                            )
-                            .clickable { currentIndex = index }
+                            .fillMaxWidth()
+                            .height(56.dp)
                     ) {
-                        if (miniThumb != null) {
-                            Image(
-                                bitmap = miniThumb!!.asImageBitmap(),
-                                contentDescription = obj.originalName,
-                                modifier = Modifier.fillMaxSize(),
-                                contentScale = ContentScale.Crop
-                            )
-                        } else {
+                        itemsIndexed(manifest.objects) { index, obj ->
+                            val isSelected = index == pagerState.currentPage
+                            var miniThumb by remember(obj.id) { mutableStateOf<Bitmap?>(null) }
+
+                            LaunchedEffect(obj.id) {
+                                val res = repository.extractEntryToBitmap(archiveFile, passphrase, obj.id, maxDimension = 120)
+                                res.onSuccess { bmp -> miniThumb = bmp }
+                            }
+
                             Box(
                                 modifier = Modifier
-                                    .fillMaxSize()
-                                    .background(Color.DarkGray)
+                                    .size(if (isSelected) 48.dp else 40.dp)
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .border(
+                                        width = if (isSelected) 2.dp else 0.dp,
+                                        color = if (isSelected) Color.White else Color.Transparent,
+                                        shape = RoundedCornerShape(8.dp)
+                                    )
+                                    .clickable {
+                                        ZarcHaptics.click(context)
+                                        scope.launch {
+                                            pagerState.animateScrollToPage(index)
+                                        }
+                                    }
+                            ) {
+                                if (miniThumb != null) {
+                                    Image(
+                                        bitmap = miniThumb!!.asImageBitmap(),
+                                        contentDescription = obj.originalName,
+                                        modifier = Modifier.fillMaxSize(),
+                                        contentScale = ContentScale.Crop
+                                    )
+                                } else {
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxSize()
+                                            .background(Color.DarkGray)
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    Spacer(Modifier.height(8.dp))
+                }
+
+                // Bottom Action Pill
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 24.dp, vertical = 6.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Surface(
+                        onClick = { saveSingleDocLauncher.launch(currentObject.originalName) },
+                        shape = RoundedCornerShape(20.dp),
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(46.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxSize(),
+                            horizontalArrangement = Arrangement.Center,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = ZarcIcons.Download,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onPrimary,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                text = "Extract this photo",
+                                style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
+                                color = MaterialTheme.colorScheme.onPrimary
                             )
                         }
                     }
@@ -2241,83 +2712,84 @@ private fun DecryptedPhotoViewer(
         }
     }
 
-    // Photo Info Inspector Modal
-    if (showInfoModal) {
-        Dialog(onDismissRequest = { showInfoModal = false }) {
-            Surface(
-                shape = RoundedCornerShape(20.dp),
-                color = MaterialTheme.colorScheme.surfaceContainerHigh,
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-                modifier = Modifier.fillMaxWidth()
+    // Photo Details Bottom Sheet (Matching Zarc Vault Gallery style)
+    if (showInfoSheet) {
+        ZarcSheet(onDismiss = { showInfoSheet = false }) {
+            SheetHeader(
+                title = currentObject.originalName,
+                subtitle = "${formatBytes(currentObject.sanitizedSize)} sanitized · ${formatBytes(currentObject.originalSize)} original",
+            )
+
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(20.dp)
+                Surface(
+                    shape = RoundedCornerShape(14.dp),
+                    color = MaterialTheme.colorScheme.surfaceContainerHighest,
+                    modifier = Modifier.fillMaxWidth()
                 ) {
-                    Text(
-                        text = "Photo details",
-                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
-                        color = MaterialTheme.colorScheme.onSurface
-                    )
-                    Spacer(Modifier.height(14.dp))
-
-                    DetailRow("File name", currentObject.originalName)
-                    DetailRow("MIME type", currentObject.mimeType)
-                    DetailRow("Original size", formatBytes(currentObject.originalSize))
-                    DetailRow("Sanitized size", formatBytes(currentObject.sanitizedSize))
-                    DetailRow(
-                        "Dimensions",
-                        if (currentBitmap != null) "${currentBitmap!!.width} × ${currentBitmap!!.height}" else "Unknown"
-                    )
-                    DetailRow("Sanitized EXIF", "Stripped during packaging")
-                    DetailRow("Cipher", "XChaCha20-Poly1305 AEAD")
-
-                    Spacer(Modifier.height(18.dp))
-
-                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                        TextButton(onClick = { showInfoModal = false }) {
-                            Text("Done")
+                    Column(
+                        modifier = Modifier.padding(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text("Cipher Suite", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text("XChaCha20-Poly1305", style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Bold), color = MaterialTheme.colorScheme.onSurface)
+                        }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text("KDF Algorithm", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text("Argon2id (m=64M, t=3, p=1)", style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Bold), color = MaterialTheme.colorScheme.onSurface)
+                        }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text("Object ID", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text(currentObject.id.take(16) + "...", style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Bold), color = MaterialTheme.colorScheme.primary)
+                        }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text("Tamper Verification", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text("Authenticated AEAD Tag Valid", style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Bold), color = ZarcPalette.verified)
                         }
                     }
                 }
             }
-        }
-    }
-}
 
-@Composable
-private fun DetailRow(label: String, value: String) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 4.dp),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Text(
-            text = label,
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-        Text(
-            text = value,
-            style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.SemiBold),
-            color = MaterialTheme.colorScheme.onSurface
-        )
+            SheetAction(
+                icon = ZarcIcons.Download,
+                title = "Extract photo to storage",
+                subtitle = "Save unencrypted copy to device folder via SAF",
+                onClick = {
+                    showInfoSheet = false
+                    saveSingleDocLauncher.launch(currentObject.originalName)
+                }
+            )
+        }
     }
 }
 
 // -----------------------------------------------------------------------------
-// HELPER UTILITIES
+// 9. HELPER FUNCTIONS
 // -----------------------------------------------------------------------------
 
 private fun queryFileName(context: Context, uri: Uri): String? {
     if (uri.scheme == "content") {
-        context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
-            val col = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-            if (col != -1 && cursor.moveToFirst()) {
-                return cursor.getString(col)
+        context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+            if (cursor.moveToFirst()) {
+                val idx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                if (idx >= 0) return cursor.getString(idx)
             }
         }
     }
@@ -2326,10 +2798,10 @@ private fun queryFileName(context: Context, uri: Uri): String? {
 
 private fun queryFileSize(context: Context, uri: Uri): Long {
     if (uri.scheme == "content") {
-        context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
-            val col = cursor.getColumnIndex(OpenableColumns.SIZE)
-            if (col != -1 && cursor.moveToFirst()) {
-                return cursor.getLong(col)
+        context.contentResolver.query(uri, arrayOf(OpenableColumns.SIZE), null, null, null)?.use { cursor ->
+            if (cursor.moveToFirst()) {
+                val idx = cursor.getColumnIndex(OpenableColumns.SIZE)
+                if (idx >= 0) return cursor.getLong(idx)
             }
         }
     }
@@ -2346,10 +2818,44 @@ private fun loadSourceThumbnail(context: Context, source: ArchivePhotoSource): B
                 val opts = BitmapFactory.Options().apply { inSampleSize = 4 }
                 BitmapFactory.decodeStream(stream, null, opts)
             }
-        } else {
-            null
-        }
+        } else null
     } catch (_: Exception) {
         null
     }
+}
+
+private fun loadSourceBitmap(context: Context, source: ArchivePhotoSource, maxDimension: Int): Bitmap? {
+    return try {
+        if (source.localFile != null && source.localFile.exists()) {
+            val boundsOpts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeFile(source.localFile.absolutePath, boundsOpts)
+            val sample = calculateInSampleSize(boundsOpts.outWidth, boundsOpts.outHeight, maxDimension)
+            val opts = BitmapFactory.Options().apply { inSampleSize = sample }
+            BitmapFactory.decodeFile(source.localFile.absolutePath, opts)
+        } else if (source.uri != null) {
+            val boundsOpts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            context.contentResolver.openInputStream(source.uri)?.use {
+                BitmapFactory.decodeStream(it, null, boundsOpts)
+            }
+            val sample = calculateInSampleSize(boundsOpts.outWidth, boundsOpts.outHeight, maxDimension)
+            val opts = BitmapFactory.Options().apply { inSampleSize = sample }
+            context.contentResolver.openInputStream(source.uri)?.use {
+                BitmapFactory.decodeStream(it, null, opts)
+            }
+        } else null
+    } catch (_: Exception) {
+        null
+    }
+}
+
+private fun calculateInSampleSize(width: Int, height: Int, maxDim: Int): Int {
+    var inSampleSize = 1
+    if (width > maxDim || height > maxDim) {
+        val halfHeight = height / 2
+        val halfWidth = width / 2
+        while ((halfHeight / inSampleSize) >= maxDim && (halfWidth / inSampleSize) >= maxDim) {
+            inSampleSize *= 2
+        }
+    }
+    return inSampleSize
 }

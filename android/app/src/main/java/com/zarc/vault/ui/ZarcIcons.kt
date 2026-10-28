@@ -119,6 +119,8 @@ internal object ZarcIcons {
     val OpenWith = Icons.AutoMirrored.Rounded.OpenInNew
     val Shield = Icons.Rounded.Shield
     val Info = Icons.Rounded.Info
+    val Download = Import
+    val Image = Roll
 
     val Play = Icons.Rounded.PlayArrow
     val Pause = Icons.Rounded.Pause

@@ -50,6 +50,7 @@ class ArchiveRepository(private val context: Context) {
         coverIndex: Int,
         passphrase: String,
         createAsPolyglotJpeg: Boolean = true,
+        externalCoverSource: ArchivePhotoSource? = null,
     ): Result<File> = withContext(Dispatchers.IO) {
         val stagingDir = File(context.cacheDir, "archive_staging_${System.currentTimeMillis()}")
         stagingDir.mkdirs()
@@ -79,21 +80,49 @@ class ArchiveRepository(private val context: Context) {
 
             val validCoverIndex = coverIndex.coerceIn(0, (names.size - 1).coerceAtLeast(0))
 
-            val outerCoverBytes: ByteArray? = if (createAsPolyglotJpeg && stagingPaths.isNotEmpty()) {
-                val coverFile = File(stagingPaths[validCoverIndex])
-                val rawBytes = coverFile.readBytes()
-                if (rawBytes.size >= 4 && rawBytes[0] == 0xFF.toByte() && rawBytes[1] == 0xD8.toByte()) {
-                    rawBytes
-                } else {
-                    val bmp = BitmapFactory.decodeFile(coverFile.absolutePath)
-                    if (bmp != null) {
-                        val baos = ByteArrayOutputStream()
-                        bmp.compress(Bitmap.CompressFormat.JPEG, 92, baos)
-                        baos.toByteArray()
-                    } else {
-                        rawBytes
+            val outerCoverBytes: ByteArray? = if (createAsPolyglotJpeg) {
+                if (externalCoverSource != null) {
+                    val extFile = File(stagingDir, "ext_cover.dat")
+                    if (externalCoverSource.localFile != null && externalCoverSource.localFile.exists()) {
+                        externalCoverSource.localFile.copyTo(extFile, overwrite = true)
+                    } else if (externalCoverSource.uri != null) {
+                        context.contentResolver.openInputStream(externalCoverSource.uri)?.use { input ->
+                            FileOutputStream(extFile).use { output ->
+                                input.copyTo(output)
+                            }
+                        }
                     }
-                }
+                    if (extFile.exists() && extFile.length() > 0) {
+                        val rawBytes = extFile.readBytes()
+                        if (rawBytes.size >= 4 && rawBytes[0] == 0xFF.toByte() && rawBytes[1] == 0xD8.toByte()) {
+                            rawBytes
+                        } else {
+                            val bmp = BitmapFactory.decodeFile(extFile.absolutePath)
+                            if (bmp != null) {
+                                val baos = ByteArrayOutputStream()
+                                bmp.compress(Bitmap.CompressFormat.JPEG, 92, baos)
+                                baos.toByteArray()
+                            } else {
+                                rawBytes
+                            }
+                        }
+                    } else null
+                } else if (stagingPaths.isNotEmpty()) {
+                    val coverFile = File(stagingPaths[validCoverIndex])
+                    val rawBytes = coverFile.readBytes()
+                    if (rawBytes.size >= 4 && rawBytes[0] == 0xFF.toByte() && rawBytes[1] == 0xD8.toByte()) {
+                        rawBytes
+                    } else {
+                        val bmp = BitmapFactory.decodeFile(coverFile.absolutePath)
+                        if (bmp != null) {
+                            val baos = ByteArrayOutputStream()
+                            bmp.compress(Bitmap.CompressFormat.JPEG, 92, baos)
+                            baos.toByteArray()
+                        } else {
+                            rawBytes
+                        }
+                    }
+                } else null
             } else {
                 null
             }
