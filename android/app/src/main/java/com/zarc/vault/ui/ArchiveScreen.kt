@@ -1,5 +1,6 @@
 package com.zarc.vault.ui
 
+import android.app.Activity
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
@@ -11,6 +12,8 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.animate
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
@@ -24,8 +27,11 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.gestures.rememberTransformableState
+import androidx.compose.foundation.gestures.transformable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -76,8 +82,10 @@ import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
@@ -96,6 +104,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -106,6 +115,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
+import android.util.LruCache
 import androidx.documentfile.provider.DocumentFile
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.zarc.vault.archive.ArchiveManifestData
@@ -115,12 +128,17 @@ import com.zarc.vault.archive.ArchiveRepository
 import com.zarc.vault.gallery.MediaItem
 import com.zarc.vault.ui.theme.ZarcPalette
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
 import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
+import kotlin.math.min
 
 /**
  * Maximum safe number of photos per single archive container.
@@ -2413,8 +2431,107 @@ private fun ExtractArchiveFlow(
 }
 
 // -----------------------------------------------------------------------------
-// 7. DECRYPTED GALLERY VIEWER (FULL GALLERY EXPERIENCE WITH MULTI-SELECT & STICKY HEADER)
+// 7. DECRYPTED GALLERY VIEWER (SESSION CACHE, PINCH-ZOOM & MULTI-SELECT)
 // -----------------------------------------------------------------------------
+
+/**
+ * In-memory and disk session cache for decrypted archive operations.
+ * Solves redundant Argon2id key derivation, eliminates concurrent temp file collisions,
+ * and enables instant, buttery-smooth swiping across decrypted photos without reloading.
+ */
+private class ArchiveSession(
+    val sessionDir: File,
+    val archiveFile: File,
+    val passphrase: String,
+    val repository: ArchiveRepository,
+) {
+    private val extractLocks = ConcurrentHashMap<String, Mutex>()
+    // 64MB memory cache for full and thumbnail bitmaps
+    private val memoryCache = object : LruCache<String, Bitmap>(64 * 1024 * 1024) {
+        override fun sizeOf(key: String, value: Bitmap): Int {
+            return value.byteCount
+        }
+    }
+
+    suspend fun getDecryptedFile(objectId: String): Result<File> = withContext(Dispatchers.IO) {
+        val target = File(sessionDir, "$objectId.bin")
+        if (target.exists() && target.length() > 0) {
+            return@withContext Result.success(target)
+        }
+        val mutex = extractLocks.computeIfAbsent(objectId) { Mutex() }
+        mutex.withLock {
+            if (target.exists() && target.length() > 0) {
+                return@withContext Result.success(target)
+            }
+            val tempExtract = File(sessionDir, "$objectId.tmp_${System.nanoTime()}")
+            try {
+                val res = repository.extractSingleEntry(archiveFile, passphrase, objectId, tempExtract)
+                if (res.isSuccess && tempExtract.exists() && tempExtract.length() > 0) {
+                    tempExtract.renameTo(target)
+                    Result.success(target)
+                } else {
+                    tempExtract.delete()
+                    Result.failure(res.exceptionOrNull() ?: Exception("Decryption failed"))
+                }
+            } catch (e: Exception) {
+                tempExtract.delete()
+                Result.failure(e)
+            }
+        }
+    }
+
+    suspend fun decodeBitmap(objectId: String, maxDimension: Int): Result<Bitmap> = withContext(Dispatchers.IO) {
+        val cacheKey = "${objectId}_$maxDimension"
+        synchronized(memoryCache) {
+            memoryCache.get(cacheKey)?.let { return@withContext Result.success(it) }
+        }
+
+        val fileRes = getDecryptedFile(objectId)
+        if (fileRes.isFailure) {
+            return@withContext Result.failure(fileRes.exceptionOrNull() ?: Exception("File extraction failed"))
+        }
+        val file = fileRes.getOrThrow()
+
+        try {
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeFile(file.absolutePath, bounds)
+            if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
+                return@withContext Result.failure(Exception("Image bounds invalid"))
+            }
+            var sample = 1
+            while (bounds.outWidth / sample > maxDimension * 2 || bounds.outHeight / sample > maxDimension * 2) {
+                sample *= 2
+            }
+            val opts = BitmapFactory.Options().apply {
+                inSampleSize = sample
+                inPreferredConfig = Bitmap.Config.ARGB_8888
+            }
+            val bmp = BitmapFactory.decodeFile(file.absolutePath, opts)
+            if (bmp != null) {
+                synchronized(memoryCache) {
+                    memoryCache.put(cacheKey, bmp)
+                }
+                Result.success(bmp)
+            } else {
+                Result.failure(Exception("Failed to decode bitmap"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    fun getCachedBitmap(objectId: String, maxDimension: Int): Bitmap? {
+        val cacheKey = "${objectId}_$maxDimension"
+        return synchronized(memoryCache) { memoryCache.get(cacheKey) }
+    }
+
+    fun cleanup() {
+        synchronized(memoryCache) {
+            memoryCache.evictAll()
+        }
+        sessionDir.deleteRecursively()
+    }
+}
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -2428,12 +2545,48 @@ private fun DecryptedGalleryViewer(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
+    // Persistent session cache for the decrypted archive: eliminates redundant Argon2id and temp file collisions
+    val session = remember(archiveFile.absolutePath, passphrase) {
+        val sessionDir = File(context.cacheDir, "decrypted_session_${System.currentTimeMillis()}_${java.util.UUID.randomUUID().toString().take(8)}")
+        sessionDir.mkdirs()
+        ArchiveSession(
+            sessionDir = sessionDir,
+            archiveFile = archiveFile,
+            passphrase = passphrase,
+            repository = repository
+        )
+    }
+
+    DisposableEffect(session) {
+        onDispose {
+            session.cleanup()
+        }
+    }
+
     var activeViewerIndex by remember { mutableStateOf<Int?>(null) }
     var isExtracting by remember { mutableStateOf(false) }
 
     // Multi-Selection State for Decrypted Gallery
     val selectedObjectIds = remember { mutableStateListOf<String>() }
     val isSelecting = selectedObjectIds.isNotEmpty()
+
+    // Pinch-to-zoom columns (2 to 6, exactly like MediaGrid in GalleryScreens.kt)
+    var columns by remember { mutableIntStateOf(3) }
+    var pinchZoom by remember { mutableFloatStateOf(1f) }
+    val transform = rememberTransformableState { zoomChange, _, _ ->
+        val next = pinchZoom * zoomChange
+        when {
+            next >= 1.3f -> {
+                columns = (columns + 1).coerceAtMost(6)
+                pinchZoom = 1f
+            }
+            next <= 0.77f -> {
+                columns = (columns - 1).coerceAtLeast(2)
+                pinchZoom = 1f
+            }
+            else -> pinchZoom = next
+        }
+    }
 
     // Handle back button: dismiss selection if active, otherwise close viewer
     BackHandler {
@@ -2455,9 +2608,6 @@ private fun DecryptedGalleryViewer(
                 if (targetDir != null && targetDir.canWrite()) {
                     var successCount = 0
                     withContext(Dispatchers.IO) {
-                        val tempExtractDir = File(context.cacheDir, "decrypted_extract_${System.currentTimeMillis()}")
-                        tempExtractDir.mkdirs()
-
                         // Determine objects to extract: if selecting, extract selected; else extract all
                         val objectsToExtract = if (selectedObjectIds.isNotEmpty()) {
                             manifest.objects.filter { selectedObjectIds.contains(it.id) }
@@ -2466,21 +2616,19 @@ private fun DecryptedGalleryViewer(
                         }
 
                         for (obj in objectsToExtract) {
-                            val tempFile = File(tempExtractDir, obj.originalName)
-                            val res = repository.extractSingleEntry(archiveFile, passphrase, obj.id, tempFile)
-                            if (res.isSuccess) {
+                            val fileRes = session.getDecryptedFile(obj.id)
+                            if (fileRes.isSuccess) {
+                                val cachedFile = fileRes.getOrThrow()
                                 val mime = if (obj.originalName.endsWith(".png", ignoreCase = true)) "image/png" else "image/jpeg"
                                 val newDoc = targetDir.createFile(mime, obj.originalName)
                                 if (newDoc != null) {
                                     context.contentResolver.openOutputStream(newDoc.uri)?.use { out ->
-                                        tempFile.inputStream().use { it.copyTo(out) }
+                                        cachedFile.inputStream().use { it.copyTo(out) }
                                     }
                                     successCount++
                                 }
                             }
-                            tempFile.delete()
                         }
-                        tempExtractDir.deleteRecursively()
                     }
                     isExtracting = false
                     selectedObjectIds.clear()
@@ -2501,7 +2649,7 @@ private fun DecryptedGalleryViewer(
         Column(
             modifier = Modifier.fillMaxSize()
         ) {
-            // Sticky Top Bar (starts immediately below notch, no extra statusBarsPadding)
+            // Sticky Top Bar (starts immediately below notch, zero extra statusBarsPadding)
             if (isSelecting) {
                 // Selection Mode Header
                 Row(
@@ -2558,240 +2706,275 @@ private fun DecryptedGalleryViewer(
                         .padding(horizontal = 8.dp, vertical = 6.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                IconButton(onClick = onClose) {
-                    Icon(
-                        imageVector = ZarcIcons.Back,
-                        contentDescription = "Close",
-                        tint = MaterialTheme.colorScheme.onSurface
-                    )
-                }
-
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = "Decrypted vault photos",
-                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
-                        color = MaterialTheme.colorScheme.onSurface
-                    )
-                    val totalBytes = manifest.objects.sumOf { it.sanitizedSize }
-                    Text(
-                        text = "${manifest.objects.size} photos · ${formatBytes(totalBytes)}",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-
-                // Extract All Button
-                Button(
-                    onClick = { extractTreeLauncher.launch(null) },
-                    shape = RoundedCornerShape(12.dp),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = MaterialTheme.colorScheme.primary,
-                        contentColor = MaterialTheme.colorScheme.onPrimary
-                    ),
-                    enabled = !isExtracting
-                ) {
-                    if (isExtracting) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(16.dp),
-                            color = MaterialTheme.colorScheme.onPrimary,
-                            strokeWidth = 2.dp
+                    IconButton(onClick = onClose) {
+                        Icon(
+                            imageVector = ZarcIcons.Back,
+                            contentDescription = "Close",
+                            tint = MaterialTheme.colorScheme.onSurface
                         )
-                    } else {
-                        Icon(ZarcIcons.Download, contentDescription = null, modifier = Modifier.size(14.dp))
-                        Spacer(Modifier.width(4.dp))
-                        Text("Extract all", style = MaterialTheme.typography.labelMedium)
+                    }
+
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Decrypted vault photos",
+                            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        val totalBytes = manifest.objects.sumOf { it.sanitizedSize }
+                        Text(
+                            text = "${manifest.objects.size} photos · ${formatBytes(totalBytes)}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+
+                    // Extract All Button
+                    Button(
+                        onClick = { extractTreeLauncher.launch(null) },
+                        shape = RoundedCornerShape(12.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.primary,
+                            contentColor = MaterialTheme.colorScheme.onPrimary
+                        ),
+                        enabled = !isExtracting
+                    ) {
+                        if (isExtracting) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(16.dp),
+                                color = MaterialTheme.colorScheme.onPrimary,
+                                strokeWidth = 2.dp
+                            )
+                        } else {
+                            Icon(ZarcIcons.Download, contentDescription = null, modifier = Modifier.size(14.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("Extract all", style = MaterialTheme.typography.labelMedium)
+                        }
+                    }
+                }
+            }
+
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+
+            // Pinch-to-zoom Grid Container
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+                    .transformable(transform)
+            ) {
+                LazyVerticalGrid(
+                    columns = GridCells.Fixed(columns),
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(horizontal = 2.dp),
+                    contentPadding = PaddingValues(top = 2.dp, bottom = 80.dp),
+                    horizontalArrangement = Arrangement.spacedBy(2.dp),
+                    verticalArrangement = Arrangement.spacedBy(2.dp)
+                ) {
+                    itemsIndexed(
+                        items = manifest.objects,
+                        key = { _, obj -> obj.id }
+                    ) { index, obj ->
+                        val isSelected = selectedObjectIds.contains(obj.id)
+                        var thumbBitmap by remember(obj.id) { mutableStateOf(session.getCachedBitmap(obj.id, 320)) }
+
+                        LaunchedEffect(obj.id) {
+                            if (thumbBitmap == null) {
+                                val result = session.decodeBitmap(obj.id, maxDimension = 320)
+                                result.onSuccess { bmp ->
+                                    thumbBitmap = bmp
+                                }
+                            }
+                        }
+
+                        Box(
+                            modifier = Modifier
+                                .aspectRatio(1f)
+                                .clip(RoundedCornerShape(2.dp))
+                                .background(MaterialTheme.colorScheme.surfaceContainerHighest)
+                                .combinedClickable(
+                                    onClick = {
+                                        if (isSelecting) {
+                                            ZarcHaptics.click(context)
+                                            if (isSelected) selectedObjectIds.remove(obj.id)
+                                            else selectedObjectIds.add(obj.id)
+                                        } else {
+                                            activeViewerIndex = index
+                                        }
+                                    },
+                                    onLongClick = {
+                                        ZarcHaptics.longPress(context)
+                                        if (isSelected) selectedObjectIds.remove(obj.id)
+                                        else selectedObjectIds.add(obj.id)
+                                    }
+                                )
+                        ) {
+                            if (thumbBitmap != null) {
+                                Image(
+                                    bitmap = thumbBitmap!!.asImageBitmap(),
+                                    contentDescription = obj.originalName,
+                                    modifier = Modifier.fillMaxSize(),
+                                    contentScale = ContentScale.Crop
+                                )
+                            } else {
+                                Box(
+                                    modifier = Modifier.fillMaxSize(),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(16.dp),
+                                        strokeWidth = 2.dp,
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
+                                }
+                            }
+
+                            // Selection Checkmark Overlay
+                            if (isSelected) {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.35f))
+                                        .border(2.dp, MaterialTheme.colorScheme.primary, RoundedCornerShape(2.dp)),
+                                    contentAlignment = Alignment.TopEnd
+                                ) {
+                                    Surface(
+                                        shape = RoundedCornerShape(bottomStart = 8.dp),
+                                        color = MaterialTheme.colorScheme.primary,
+                                    ) {
+                                        Text(
+                                            text = "✓",
+                                            color = MaterialTheme.colorScheme.onPrimary,
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 12.sp,
+                                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                        )
+                                    }
+                                }
+                            } else if (isSelecting) {
+                                // Unselected selection indicator ring
+                                Box(
+                                    modifier = Modifier
+                                        .align(Alignment.TopEnd)
+                                        .padding(4.dp)
+                                        .size(18.dp)
+                                        .clip(CircleShape)
+                                        .border(1.5.dp, Color.White.copy(alpha = 0.85f), CircleShape)
+                                        .background(Color.Black.copy(alpha = 0.35f))
+                                )
+                            }
+
+                            // Bottom file info badge (non-clickable so tap registers on parent card)
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .align(Alignment.BottomCenter)
+                                    .background(Color.Black.copy(alpha = 0.55f))
+                                    .padding(horizontal = 4.dp, vertical = 2.dp)
+                            ) {
+                                Text(
+                                    text = obj.originalName,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = Color.White,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    fontSize = 8.sp
+                                )
+                            }
+                        }
                     }
                 }
             }
         }
 
-        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
-
-        // Decrypted Photos Grid with Long-Press Multi-Select
-        Box(modifier = Modifier.weight(1f)) {
-            LazyVerticalGrid(
-                columns = GridCells.Adaptive(minSize = 110.dp),
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(2.dp),
-                horizontalArrangement = Arrangement.spacedBy(2.dp),
-                verticalArrangement = Arrangement.spacedBy(2.dp)
+        // Samsung Floating Selection Pill (identical styling to Zarc SelectionBottomBar)
+        androidx.compose.animation.AnimatedVisibility(
+            visible = isSelecting,
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .navigationBarsPadding()
+                .padding(bottom = 16.dp),
+            enter = fadeIn() + slideInVertically { it },
+            exit = fadeOut() + slideOutVertically { it }
+        ) {
+            Surface(
+                color = Color(0xFF222226),
+                contentColor = Color.White,
+                shape = RoundedCornerShape(30.dp),
+                shadowElevation = 24.dp,
+                border = BorderStroke(1.dp, Color.White.copy(alpha = 0.12f)),
             ) {
-                itemsIndexed(manifest.objects) { index, obj ->
-                    val isSelected = selectedObjectIds.contains(obj.id)
-                    var thumbBitmap by remember(obj.id) { mutableStateOf<Bitmap?>(null) }
-
-                    LaunchedEffect(obj.id) {
-                        val result = repository.extractEntryToBitmap(archiveFile, passphrase, obj.id, maxDimension = 320)
-                        result.onSuccess { bmp -> thumbBitmap = bmp }
-                    }
-
-                    Box(
-                        modifier = Modifier
-                            .aspectRatio(1f)
-                            .clip(RoundedCornerShape(4.dp))
-                            .background(MaterialTheme.colorScheme.surfaceContainerHighest)
-                            .combinedClickable(
-                                onClick = {
-                                    if (isSelecting) {
-                                        ZarcHaptics.click(context)
-                                        if (isSelected) selectedObjectIds.remove(obj.id)
-                                        else selectedObjectIds.add(obj.id)
-                                    } else {
-                                        activeViewerIndex = index
-                                    }
-                                },
-                                onLongClick = {
-                                    ZarcHaptics.longPress(context)
-                                    if (isSelected) selectedObjectIds.remove(obj.id)
-                                    else selectedObjectIds.add(obj.id)
-                                }
-                            )
-                    ) {
-                        if (thumbBitmap != null) {
-                            Image(
-                                bitmap = thumbBitmap!!.asImageBitmap(),
-                                contentDescription = obj.originalName,
-                                modifier = Modifier.fillMaxSize(),
-                                contentScale = ContentScale.Crop
-                            )
-                        } else {
-                            Box(
-                                modifier = Modifier.fillMaxSize(),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                CircularProgressIndicator(
-                                    modifier = Modifier.size(18.dp),
-                                    strokeWidth = 2.dp,
-                                    color = MaterialTheme.colorScheme.primary
-                                )
-                            }
-                        }
-
-                        // Selection Checkmark Overlay
-                        if (isSelected) {
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxSize()
-                                    .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.35f)),
-                                contentAlignment = Alignment.TopEnd
-                            ) {
-                                Surface(
-                                    shape = RoundedCornerShape(bottomStart = 8.dp),
-                                    color = MaterialTheme.colorScheme.primary,
-                                ) {
-                                    Text(
-                                        text = "✓",
-                                        color = MaterialTheme.colorScheme.onPrimary,
-                                        fontWeight = FontWeight.Bold,
-                                        fontSize = 12.sp,
-                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                                    )
-                                }
-                            }
-                        } else if (isSelecting) {
-                            // Unselected selection indicator ring
-                            Box(
-                                modifier = Modifier
-                                    .align(Alignment.TopEnd)
-                                    .padding(6.dp)
-                                    .size(20.dp)
-                                    .clip(CircleShape)
-                                    .border(1.5.dp, Color.White.copy(alpha = 0.8f), CircleShape)
-                                    .background(Color.Black.copy(alpha = 0.3f))
-                            )
-                        }
-
-                        // Bottom file info badge (non-clickable so tap registers on parent card)
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .align(Alignment.BottomCenter)
-                                .background(Color.Black.copy(alpha = 0.55f))
-                                .padding(horizontal = 4.dp, vertical = 2.dp)
-                        ) {
-                            Text(
-                                text = obj.originalName,
-                                style = MaterialTheme.typography.labelSmall,
-                                color = Color.White,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                fontSize = 8.sp
-                            )
-                        }
-                    }
-                }
-            }
-
-            // Floating Selection Action Bar (when selecting items)
-            androidx.compose.animation.AnimatedVisibility(
-                visible = isSelecting,
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .navigationBarsPadding()
-                    .padding(horizontal = 24.dp, vertical = 16.dp),
-                enter = fadeIn() + slideInVertically { it },
-                exit = fadeOut() + slideOutVertically { it }
-            ) {
-                Surface(
-                    onClick = { extractTreeLauncher.launch(null) },
-                    shape = RoundedCornerShape(24.dp),
-                    color = MaterialTheme.colorScheme.primary,
-                    tonalElevation = 6.dp,
-                    shadowElevation = 8.dp,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(50.dp)
+                Row(
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
                     Row(
-                        modifier = Modifier.fillMaxSize(),
-                        horizontalArrangement = Arrangement.Center,
-                        verticalAlignment = Alignment.CenterVertically
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(20.dp))
+                            .clickable {
+                                ZarcHaptics.click(context)
+                                extractTreeLauncher.launch(null)
+                            }
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         if (isExtracting) {
                             CircularProgressIndicator(
-                                modifier = Modifier.size(18.dp),
-                                color = MaterialTheme.colorScheme.onPrimary,
+                                modifier = Modifier.size(16.dp),
+                                color = MaterialTheme.colorScheme.primary,
                                 strokeWidth = 2.dp
-                            )
-                            Spacer(Modifier.width(8.dp))
-                            Text(
-                                text = "Extracting ${selectedObjectIds.size} photos...",
-                                style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
-                                color = MaterialTheme.colorScheme.onPrimary
                             )
                         } else {
                             Icon(
                                 imageVector = ZarcIcons.Download,
                                 contentDescription = null,
-                                tint = MaterialTheme.colorScheme.onPrimary,
+                                tint = MaterialTheme.colorScheme.primary,
                                 modifier = Modifier.size(18.dp)
                             )
-                            Spacer(Modifier.width(8.dp))
-                            Text(
-                                text = "Extract Selected (${selectedObjectIds.size})",
-                                style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
-                                color = MaterialTheme.colorScheme.onPrimary
-                            )
                         }
+                        Text(
+                            text = "Extract (${selectedObjectIds.size})",
+                            style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
+                            color = Color.White
+                        )
                     }
+
+                    Box(
+                        modifier = Modifier
+                            .width(1.dp)
+                            .height(20.dp)
+                            .background(Color.White.copy(alpha = 0.2f))
+                    )
+
+                    Text(
+                        text = "Clear",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = Color.White.copy(alpha = 0.8f),
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(12.dp))
+                            .clickable {
+                                ZarcHaptics.click(context)
+                                selectedObjectIds.clear()
+                            }
+                            .padding(horizontal = 10.dp, vertical = 8.dp)
+                    )
                 }
             }
         }
-    }
 
-    // Full-Screen Gallery Viewer with Swipe, Zoom, Tap-to-Hide Chrome & Mini-Roll
-    if (activeViewerIndex != null) {
-        DecryptedPhotoViewer(
-            manifest = manifest,
-            initialIndex = activeViewerIndex!!,
-            archiveFile = archiveFile,
-            repository = repository,
-            passphrase = passphrase,
-            onClose = { activeViewerIndex = null }
-        )
+        // Full-Screen Gallery Viewer with Swipe, Zoom, Tap-to-Hide Chrome & Mini-Roll
+        if (activeViewerIndex != null) {
+            DecryptedPhotoViewer(
+                manifest = manifest,
+                initialIndex = activeViewerIndex!!,
+                archiveFile = archiveFile,
+                session = session,
+                onClose = { activeViewerIndex = null }
+            )
+        }
     }
-}
 }
 
 // -----------------------------------------------------------------------------
@@ -2803,8 +2986,7 @@ private fun DecryptedPhotoViewer(
     manifest: ArchiveManifestData,
     initialIndex: Int,
     archiveFile: File,
-    repository: ArchiveRepository,
-    passphrase: String,
+    session: ArchiveSession,
     onClose: () -> Unit,
 ) {
     val context = LocalContext.current
@@ -2832,349 +3014,600 @@ private fun DecryptedPhotoViewer(
         var chromeVisible by remember { mutableStateOf(true) }
         var showInfoSheet by remember { mutableStateOf(false) }
 
-    // In-memory cache for decrypted bitmaps during viewing session
-    val bitmapCache = remember { mutableMapOf<String, Bitmap>() }
-
-    // Single Photo Extract Launcher
-    val saveSingleDocLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.CreateDocument("image/jpeg")
-    ) { destUri ->
-        if (destUri != null) {
-            scope.launch {
-                val tempOut = File(context.cacheDir, "single_export_${System.currentTimeMillis()}.tmp")
-                val res = repository.extractSingleEntry(archiveFile, passphrase, currentObject.id, tempOut)
-                res.onSuccess { extractedFile ->
-                    withContext(Dispatchers.IO) {
-                        context.contentResolver.openOutputStream(destUri)?.use { out ->
-                            extractedFile.inputStream().use { inStream ->
-                                inStream.copyTo(out)
+        // Single Photo Extract Launcher
+        val saveSingleDocLauncher = rememberLauncherForActivityResult(
+            contract = ActivityResultContracts.CreateDocument(currentObject.mimeType.ifEmpty { "image/jpeg" })
+        ) { destUri ->
+            if (destUri != null) {
+                scope.launch {
+                    val fileRes = session.getDecryptedFile(currentObject.id)
+                    fileRes.onSuccess { cachedFile ->
+                        withContext(Dispatchers.IO) {
+                            context.contentResolver.openOutputStream(destUri)?.use { out ->
+                                cachedFile.inputStream().use { inStream ->
+                                    inStream.copyTo(out)
+                                }
                             }
                         }
+                        Toast.makeText(context, "Saved ${currentObject.originalName} successfully!", Toast.LENGTH_SHORT).show()
+                    }.onFailure {
+                        Toast.makeText(context, "Failed to extract: ${it.message}", Toast.LENGTH_SHORT).show()
                     }
-                    tempOut.delete()
-                    Toast.makeText(context, "Saved ${currentObject.originalName} successfully!", Toast.LENGTH_SHORT).show()
-                }.onFailure {
-                    tempOut.delete()
-                    Toast.makeText(context, "Failed to extract: ${it.message}", Toast.LENGTH_SHORT).show()
                 }
             }
         }
-    }
 
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(Color.Black)
-    ) {
-        // HorizontalPager for natural swipe to next/prev with Compose physics
-        HorizontalPager(
-            state = pagerState,
-            key = { manifest.objects[it].id },
-            modifier = Modifier.fillMaxSize()
-        ) { page ->
-            val obj = manifest.objects[page]
-            var pageBitmap by remember(obj.id) { mutableStateOf(bitmapCache[obj.id]) }
-            var isDecoding by remember(obj.id) { mutableStateOf(pageBitmap == null) }
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black)
+        ) {
+            // HorizontalPager for natural swipe to next/prev with Compose physics
+            HorizontalPager(
+                state = pagerState,
+                key = { manifest.objects[it].id },
+                modifier = Modifier.fillMaxSize()
+            ) { page ->
+                val obj = manifest.objects[page]
+                DecryptedZoomableMedia(
+                    obj = obj,
+                    session = session,
+                    onSingleTap = { chromeVisible = !chromeVisible },
+                    modifier = Modifier.fillMaxSize()
+                )
+            }
 
-            LaunchedEffect(obj.id) {
-                if (pageBitmap == null) {
-                    val res = repository.extractEntryToBitmap(archiveFile, passphrase, obj.id, maxDimension = 2048)
-                    res.onSuccess { bmp ->
-                        bitmapCache[obj.id] = bmp
-                        pageBitmap = bmp
+            // Top App Bar with Scrim (Fade & Slide with Chrome visibility)
+            AnimatedVisibility(
+                visible = chromeVisible,
+                modifier = Modifier.align(Alignment.TopCenter),
+                enter = fadeIn() + slideInVertically { -it },
+                exit = fadeOut() + slideOutVertically { -it },
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(
+                            Brush.verticalGradient(
+                                listOf(Color.Black.copy(alpha = 0.85f), Color.Transparent)
+                            )
+                        )
+                        .statusBarsPadding()
+                        .padding(horizontal = 8.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    IconButton(onClick = onClose) {
+                        Icon(imageVector = ZarcIcons.Back, contentDescription = "Close", tint = Color.White)
                     }
-                    isDecoding = false
+
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = currentObject.originalName,
+                            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold),
+                            color = Color.White,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Text(
+                            text = "${pagerState.currentPage + 1} of ${manifest.objects.size} · ${formatBytes(currentObject.sanitizedSize)}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Color.White.copy(alpha = 0.75f)
+                        )
+                    }
+
+                    IconButton(onClick = { showInfoSheet = true }) {
+                        Icon(imageVector = ZarcIcons.Info, contentDescription = "Details", tint = Color.White)
+                    }
+                    // Extract button removed from beside Info button per user request (already present in bottom bar)
                 }
             }
 
-            var scale by remember { mutableStateOf(1f) }
-            var offsetX by remember { mutableStateOf(0f) }
-            var offsetY by remember { mutableStateOf(0f) }
-
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .pointerInput(Unit) {
-                        detectTapGestures(
-                            onDoubleTap = {
-                                scale = if (scale > 1f) 1f else 2.5f
-                                offsetX = 0f
-                                offsetY = 0f
-                            },
-                            onTap = {
-                                chromeVisible = !chromeVisible
-                            }
+            // Bottom Filmstrip Carousel (Samsung MiniRoll) matching ViewerAndSettings.kt
+            AnimatedVisibility(
+                visible = chromeVisible,
+                modifier = Modifier.align(Alignment.BottomCenter),
+                enter = fadeIn() + slideInVertically { it },
+                exit = fadeOut() + slideOutVertically { it },
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(
+                            Brush.verticalGradient(
+                                listOf(Color.Transparent, Color.Black.copy(alpha = 0.90f))
+                            )
                         )
-                    }
-                    .pointerInput(page) {
-                        detectTransformGestures { _, pan, zoom, _ ->
-                            scale = (scale * zoom).coerceIn(1f, 5f)
-                            if (scale > 1f) {
-                                offsetX += pan.x
-                                offsetY += pan.y
-                            } else {
-                                offsetX = 0f
-                                offsetY = 0f
-                            }
+                        .navigationBarsPadding()
+                        .padding(bottom = 8.dp)
+                ) {
+                    if (manifest.objects.size > 1) {
+                        val filmstripState = rememberLazyListState()
+
+                        LaunchedEffect(pagerState.currentPage) {
+                            filmstripState.animateScrollToItem(maxOf(0, pagerState.currentPage - 2))
                         }
-                    },
-                contentAlignment = Alignment.Center
-            ) {
-                if (pageBitmap != null) {
-                    Image(
-                        bitmap = pageBitmap!!.asImageBitmap(),
-                        contentDescription = obj.originalName,
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .graphicsLayer(
-                                scaleX = scale,
-                                scaleY = scale,
-                                translationX = offsetX,
-                                translationY = offsetY
-                            ),
-                        contentScale = ContentScale.Fit
-                    )
-                } else if (isDecoding) {
-                    CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
-                }
-            }
-        }
 
-        // Top App Bar (Fade & Slide with Chrome visibility)
-        AnimatedVisibility(
-            visible = chromeVisible,
-            modifier = Modifier.align(Alignment.TopCenter),
-            enter = fadeIn() + slideInVertically { -it },
-            exit = fadeOut() + slideOutVertically { -it },
-        ) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(
-                        Brush.verticalGradient(
-                            listOf(Color.Black.copy(alpha = 0.85f), Color.Transparent)
-                        )
-                    )
-                    .statusBarsPadding()
-                    .padding(horizontal = 8.dp, vertical = 6.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                IconButton(onClick = onClose) {
-                    Icon(imageVector = ZarcIcons.Back, contentDescription = "Close", tint = Color.White)
-                }
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(60.dp)
+                                .padding(horizontal = 8.dp, vertical = 4.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            LazyRow(
+                                state = filmstripState,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                contentPadding = PaddingValues(horizontal = 12.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.fillMaxSize()
+                            ) {
+                                itemsIndexed(manifest.objects, key = { _, it -> it.id }) { index, tileObj ->
+                                    val isSelected = index == pagerState.currentPage
+                                    var miniThumb by remember(tileObj.id) { mutableStateOf(session.getCachedBitmap(tileObj.id, 140)) }
 
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = currentObject.originalName,
-                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold),
-                        color = Color.White,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    Text(
-                        text = "${pagerState.currentPage + 1} of ${manifest.objects.size} · ${formatBytes(currentObject.sanitizedSize)}",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = Color.White.copy(alpha = 0.75f)
-                    )
-                }
-
-                IconButton(onClick = { showInfoSheet = true }) {
-                    Icon(imageVector = ZarcIcons.Info, contentDescription = "Details", tint = Color.White)
-                }
-
-                IconButton(onClick = { saveSingleDocLauncher.launch(currentObject.originalName) }) {
-                    Icon(imageVector = ZarcIcons.Download, contentDescription = "Extract", tint = Color.White)
-                }
-            }
-        }
-
-        // Bottom Filmstrip MiniRoll & Quick Action Bar (Fade & Slide with Chrome visibility)
-        AnimatedVisibility(
-            visible = chromeVisible,
-            modifier = Modifier.align(Alignment.BottomCenter),
-            enter = fadeIn() + slideInVertically { it },
-            exit = fadeOut() + slideOutVertically { it },
-        ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(
-                        Brush.verticalGradient(
-                            listOf(Color.Transparent, Color.Black.copy(alpha = 0.90f))
-                        )
-                    )
-                    .navigationBarsPadding()
-                    .padding(bottom = 8.dp)
-            ) {
-                // Interactive MiniRoll (Samsung / Apple Gallery style)
-                if (manifest.objects.size > 1) {
-                    val filmstripState = rememberLazyListState()
-
-                    LaunchedEffect(pagerState.currentPage) {
-                        filmstripState.animateScrollToItem(maxOf(0, pagerState.currentPage - 2))
-                    }
-
-                    LazyRow(
-                        state = filmstripState,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        contentPadding = PaddingValues(horizontal = 16.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(56.dp)
-                    ) {
-                        itemsIndexed(manifest.objects) { index, obj ->
-                            val isSelected = index == pagerState.currentPage
-                            var miniThumb by remember(obj.id) { mutableStateOf<Bitmap?>(null) }
-
-                            LaunchedEffect(obj.id) {
-                                val res = repository.extractEntryToBitmap(archiveFile, passphrase, obj.id, maxDimension = 120)
-                                res.onSuccess { bmp -> miniThumb = bmp }
-                            }
-
-                            Box(
-                                modifier = Modifier
-                                    .size(if (isSelected) 48.dp else 40.dp)
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .border(
-                                        width = if (isSelected) 2.dp else 0.dp,
-                                        color = if (isSelected) Color.White else Color.Transparent,
-                                        shape = RoundedCornerShape(8.dp)
-                                    )
-                                    .clickable {
-                                        ZarcHaptics.click(context)
-                                        scope.launch {
-                                            pagerState.animateScrollToPage(index)
+                                    LaunchedEffect(tileObj.id) {
+                                        if (miniThumb == null) {
+                                            val res = session.decodeBitmap(tileObj.id, maxDimension = 140)
+                                            res.onSuccess { bmp ->
+                                                miniThumb = bmp
+                                            }
                                         }
                                     }
-                            ) {
-                                if (miniThumb != null) {
-                                    Image(
-                                        bitmap = miniThumb!!.asImageBitmap(),
-                                        contentDescription = obj.originalName,
-                                        modifier = Modifier.fillMaxSize(),
-                                        contentScale = ContentScale.Crop
-                                    )
-                                } else {
+
                                     Box(
                                         modifier = Modifier
-                                            .fillMaxSize()
-                                            .background(Color.DarkGray)
+                                            .size(if (isSelected) 48.dp else 40.dp)
+                                            .clip(RoundedCornerShape(8.dp))
+                                            .then(
+                                                if (isSelected) {
+                                                    Modifier.border(2.dp, Color.White, RoundedCornerShape(8.dp))
+                                                } else {
+                                                    Modifier
+                                                }
+                                            )
+                                            .clickable {
+                                                ZarcHaptics.click(context)
+                                                scope.launch {
+                                                    pagerState.animateScrollToPage(index)
+                                                }
+                                            }
+                                    ) {
+                                        if (miniThumb != null) {
+                                            Image(
+                                                bitmap = miniThumb!!.asImageBitmap(),
+                                                contentDescription = tileObj.originalName,
+                                                modifier = Modifier.fillMaxSize(),
+                                                contentScale = ContentScale.Crop
+                                            )
+                                        } else {
+                                            Box(
+                                                modifier = Modifier
+                                                    .fillMaxSize()
+                                                    .background(Color.DarkGray)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        Spacer(Modifier.height(4.dp))
+                    }
+
+                    // Floating Bottom Action Pill
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 24.dp, vertical = 6.dp),
+                        horizontalArrangement = Arrangement.Center,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Surface(
+                            onClick = { saveSingleDocLauncher.launch(currentObject.originalName) },
+                            shape = RoundedCornerShape(24.dp),
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(46.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxSize(),
+                                horizontalArrangement = Arrangement.Center,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    imageVector = ZarcIcons.Download,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.onPrimary,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(Modifier.width(8.dp))
+                                Text(
+                                    text = "Extract this photo",
+                                    style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
+                                    color = MaterialTheme.colorScheme.onPrimary
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            ArchiveImmersiveChrome(hidden = !chromeVisible)
+        }
+
+        // Photo Details Bottom Sheet (Zero truncation, gorgeous cards & typography)
+        if (showInfoSheet) {
+            val cachedBmp = session.getCachedBitmap(currentObject.id, 2560)
+            ZarcSheet(onDismiss = { showInfoSheet = false }) {
+                SheetHeader(
+                    title = currentObject.originalName,
+                    subtitle = "${formatBytes(currentObject.sanitizedSize)} sanitized · ${formatBytes(currentObject.originalSize)} original",
+                )
+
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 6.dp)
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    // Card 1: File Specifications
+                    Surface(
+                        shape = RoundedCornerShape(16.dp),
+                        color = MaterialTheme.colorScheme.surfaceContainerHighest,
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(16.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Icon(
+                                    imageVector = ZarcIcons.Info,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Text(
+                                    text = "File specifications",
+                                    style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                            }
+
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f))
+
+                            InfoPropertyRow(
+                                label = "Original file name",
+                                value = currentObject.originalName
+                            )
+
+                            val ext = currentObject.originalName.substringAfterLast('.', "").uppercase(Locale.getDefault())
+                            InfoPropertyRow(
+                                label = "Format & MIME type",
+                                value = if (ext.isNotEmpty()) "$ext Image (${currentObject.mimeType})" else currentObject.mimeType
+                            )
+
+                            if (cachedBmp != null) {
+                                InfoPropertyRow(
+                                    label = "Dimensions",
+                                    value = "${cachedBmp.width} × ${cachedBmp.height} pixels"
+                                )
+                            }
+
+                            InfoPropertyRow(
+                                label = "Encrypted storage size",
+                                value = "${formatBytes(currentObject.sanitizedSize)} (${currentObject.sanitizedSize} bytes)"
+                            )
+
+                            InfoPropertyRow(
+                                label = "Source container",
+                                value = archiveFile.name
+                            )
+                        }
+                    }
+
+                    // Card 2: Cryptographic Security & Integrity
+                    Surface(
+                        shape = RoundedCornerShape(16.dp),
+                        color = MaterialTheme.colorScheme.surfaceContainerHighest,
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(16.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Icon(
+                                    imageVector = ZarcIcons.Lock,
+                                    contentDescription = null,
+                                    tint = ZarcPalette.verified,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Text(
+                                    text = "Cryptographic integrity",
+                                    style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                            }
+
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f))
+
+                            // Tamper Verification status banner
+                            Surface(
+                                shape = RoundedCornerShape(10.dp),
+                                color = ZarcPalette.verified.copy(alpha = 0.12f),
+                                border = BorderStroke(1.dp, ZarcPalette.verified.copy(alpha = 0.35f)),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Text(
+                                        text = "✓",
+                                        color = ZarcPalette.verified,
+                                        fontWeight = FontWeight.Black,
+                                        fontSize = 14.sp
+                                    )
+                                    Text(
+                                        text = "Authenticated AEAD Tag Verified (No Tampering)",
+                                        style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.SemiBold),
+                                        color = ZarcPalette.verified
+                                    )
+                                }
+                            }
+
+                            InfoPropertyRow(
+                                label = "Cipher suite",
+                                value = "XChaCha20-Poly1305 (256-bit key, 192-bit nonce)"
+                            )
+
+                            InfoPropertyRow(
+                                label = "Key derivation function",
+                                value = "Argon2id (m=64MB, t=3 passes, p=1 lane)"
+                            )
+
+                            // Monospace Object ID Card
+                            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Text(
+                                    text = "Object identifier",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                Surface(
+                                    shape = RoundedCornerShape(8.dp),
+                                    color = MaterialTheme.colorScheme.surfaceContainer,
+                                    border = BorderStroke(0.5.dp, MaterialTheme.colorScheme.outlineVariant),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Text(
+                                        text = currentObject.id,
+                                        style = MaterialTheme.typography.bodySmall.copy(
+                                            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                                        ),
+                                        color = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                                        softWrap = true
                                     )
                                 }
                             }
                         }
                     }
 
-                    Spacer(Modifier.height(8.dp))
-                }
-
-                // Bottom Action Pill
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 24.dp, vertical = 6.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Surface(
-                        onClick = { saveSingleDocLauncher.launch(currentObject.originalName) },
-                        shape = RoundedCornerShape(20.dp),
-                        color = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(46.dp)
-                    ) {
-                        Row(
-                            modifier = Modifier.fillMaxSize(),
-                            horizontalArrangement = Arrangement.Center,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Icon(
-                                imageVector = ZarcIcons.Download,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.onPrimary,
-                                modifier = Modifier.size(18.dp)
-                            )
-                            Spacer(Modifier.width(8.dp))
-                            Text(
-                                text = "Extract this photo",
-                                style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
-                                color = MaterialTheme.colorScheme.onPrimary
-                            )
-                        }
-                    }
+                    Spacer(Modifier.height(10.dp))
                 }
             }
         }
     }
+}
 
-    // Photo Details Bottom Sheet
-    if (showInfoSheet) {
-        ZarcSheet(onDismiss = { showInfoSheet = false }) {
-            SheetHeader(
-                title = currentObject.originalName,
-                subtitle = "${formatBytes(currentObject.sanitizedSize)} sanitized · ${formatBytes(currentObject.originalSize)} original",
-            )
+/**
+ * Clean vertically-stacked property row for the details dialog.
+ * Eliminates horizontal line clamping and ensures zero text truncation.
+ */
+@Composable
+private fun InfoPropertyRow(
+    label: String,
+    value: String,
+) {
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(2.dp)
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Text(
+            text = value,
+            style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Medium),
+            color = MaterialTheme.colorScheme.onSurface,
+            softWrap = true
+        )
+    }
+}
 
-            Column(
+/**
+ * A decoded archive image with smooth physics pinch to zoom, centroid aware panning,
+ * double-tap to zoom in/out with animation (tween 220ms), and single tap callback for chrome toggle.
+ * Uses ArchiveSession for instant memory retrieval and zero redundant decryptions.
+ */
+@Composable
+private fun DecryptedZoomableMedia(
+    obj: ArchiveObject,
+    session: ArchiveSession,
+    onSingleTap: () -> Unit = {},
+    modifier: Modifier = Modifier,
+) {
+    var scale by remember(obj.id) { mutableFloatStateOf(1f) }
+    var offsetX by remember(obj.id) { mutableFloatStateOf(0f) }
+    var offsetY by remember(obj.id) { mutableFloatStateOf(0f) }
+    var bitmap by remember(obj.id) { mutableStateOf(session.getCachedBitmap(obj.id, 2560)) }
+    var failed by remember(obj.id) { mutableStateOf(false) }
+    var animationJob by remember(obj.id) { mutableStateOf<Job?>(null) }
+    val scope = rememberCoroutineScope()
+
+    LaunchedEffect(obj.id) {
+        if (bitmap == null) {
+            val res = session.decodeBitmap(obj.id, maxDimension = 2560)
+            res.onSuccess { bmp ->
+                bitmap = bmp
+            }.onFailure {
+                failed = true
+            }
+        }
+    }
+
+    BoxWithConstraints(
+        modifier = modifier,
+        contentAlignment = Alignment.Center,
+    ) {
+        val viewportWidth = constraints.maxWidth.toFloat()
+        val viewportHeight = constraints.maxHeight.toFloat()
+        val aspect = when {
+            bitmap != null -> bitmap!!.width.toFloat() / bitmap!!.height.coerceAtLeast(1)
+            else -> 1f
+        }
+        val displayedWidth = min(viewportWidth, viewportHeight * aspect)
+        val displayedHeight = min(viewportHeight, viewportWidth / aspect)
+
+        fun maxOffsetX(candidate: Float): Float =
+            ((displayedWidth * candidate - viewportWidth) / 2f).coerceAtLeast(0f)
+
+        fun maxOffsetY(candidate: Float): Float =
+            ((displayedHeight * candidate - viewportHeight) / 2f).coerceAtLeast(0f)
+
+        fun clampOffsets(candidate: Float) {
+            offsetX = offsetX.coerceIn(-maxOffsetX(candidate), maxOffsetX(candidate))
+            offsetY = offsetY.coerceIn(-maxOffsetY(candidate), maxOffsetY(candidate))
+        }
+
+        fun animateTo(targetScale: Float, targetX: Float, targetY: Float) {
+            animationJob?.cancel()
+            val startScale = scale
+            val startX = offsetX
+            val startY = offsetY
+            animationJob = scope.launch {
+                animate(
+                    initialValue = 0f,
+                    targetValue = 1f,
+                    animationSpec = tween(220),
+                ) { fraction, _ ->
+                    scale = startScale + (targetScale - startScale) * fraction
+                    offsetX = startX + (targetX - startX) * fraction
+                    offsetY = startY + (targetY - startY) * fraction
+                }
+            }
+        }
+
+        val current = bitmap
+        if (current != null) {
+            Image(
+                bitmap = current.asImageBitmap(),
+                contentDescription = obj.originalName,
+                contentScale = ContentScale.Fit,
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 8.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                Surface(
-                    shape = RoundedCornerShape(14.dp),
-                    color = MaterialTheme.colorScheme.surfaceContainerHighest,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Column(
-                        modifier = Modifier.padding(14.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Text("Cipher Suite", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            Text("XChaCha20-Poly1305", style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Bold), color = MaterialTheme.colorScheme.onSurface)
-                        }
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Text("KDF Algorithm", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            Text("Argon2id (m=64M, t=3, p=1)", style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Bold), color = MaterialTheme.colorScheme.onSurface)
-                        }
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Text("Object ID", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            Text(currentObject.id.take(16) + "...", style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Bold), color = MaterialTheme.colorScheme.primary)
-                        }
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Text("Tamper Verification", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            Text("Authenticated AEAD Tag Valid", style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Bold), color = ZarcPalette.verified)
-                        }
+                    .fillMaxSize()
+                    .graphicsLayer {
+                        scaleX = scale
+                        scaleY = scale
+                        translationX = offsetX
+                        translationY = offsetY
                     }
-                }
-            }
-
-            SheetAction(
-                icon = ZarcIcons.Download,
-                title = "Extract photo to storage",
-                subtitle = "Save unencrypted copy to device folder via SAF",
-                onClick = {
-                    showInfoSheet = false
-                    saveSingleDocLauncher.launch(currentObject.originalName)
-                }
+                    .then(
+                        if (scale > 1.05f) {
+                            Modifier.pointerInput(obj.id, displayedWidth, displayedHeight) {
+                                detectTransformGestures(panZoomLock = true) { centroid, pan, zoom, _ ->
+                                    animationJob?.cancel()
+                                    val oldScale = scale
+                                    val nextScale = (oldScale * zoom).coerceIn(1f, 6f)
+                                    if (nextScale != oldScale) {
+                                        val factor = nextScale / oldScale
+                                        val centerX = centroid.x - size.width / 2f
+                                        val centerY = centroid.y - size.height / 2f
+                                        offsetX = offsetX * factor + centerX * (1f - factor)
+                                        offsetY = offsetY * factor + centerY * (1f - factor)
+                                    }
+                                    offsetX += pan.x
+                                    offsetY += pan.y
+                                    scale = nextScale
+                                    clampOffsets(nextScale)
+                                }
+                            }
+                        } else {
+                            Modifier
+                        }
+                    )
+                    .pointerInput(obj.id) {
+                        detectTapGestures(
+                            onTap = { onSingleTap() },
+                            onDoubleTap = { position ->
+                                val target = if (scale > 1.05f) 1f else 2.5f
+                                if (target == 1f) {
+                                    animateTo(1f, 0f, 0f)
+                                } else {
+                                    val factor = target / scale
+                                    val centerX = position.x - size.width / 2f
+                                    val centerY = position.y - size.height / 2f
+                                    val targetX = (offsetX * factor + centerX * (1f - factor))
+                                        .coerceIn(-maxOffsetX(target), maxOffsetX(target))
+                                    val targetY = (offsetY * factor + centerY * (1f - factor))
+                                        .coerceIn(-maxOffsetY(target), maxOffsetY(target))
+                                    animateTo(target, targetX, targetY)
+                                }
+                            },
+                        )
+                    },
             )
+        } else {
+            if (failed) {
+                Text(
+                    text = "The media could not be decoded",
+                    color = Color.White,
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            } else {
+                CircularProgressIndicator(
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(36.dp),
+                    strokeWidth = 3.dp
+                )
+            }
         }
     }
+}
+
+/** Hide the system bars while the viewer is immersive, and restore them. */
+@Composable
+private fun ArchiveImmersiveChrome(hidden: Boolean) {
+    val view = LocalView.current
+    val context = LocalContext.current
+    if (view.isInEditMode) return
+    DisposableEffect(hidden) {
+        val window = (context as? Activity)?.window
+        val controller = window?.let { WindowCompat.getInsetsController(it, view) }
+        if (hidden) {
+            controller?.systemBarsBehavior =
+                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            controller?.hide(WindowInsetsCompat.Type.systemBars())
+        } else {
+            controller?.show(WindowInsetsCompat.Type.systemBars())
+        }
+        onDispose {
+            controller?.show(WindowInsetsCompat.Type.systemBars())
+        }
     }
 }
 
