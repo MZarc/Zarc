@@ -200,13 +200,12 @@ private fun ArchiveLauncherScreen(
     Column(
         modifier = Modifier.fillMaxSize()
     ) {
-        // Sticky Top App Bar
+        // Sticky Top App Bar (starts immediately below notch, no extra statusBarsPadding)
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .background(MaterialTheme.colorScheme.background)
-                .statusBarsPadding()
-                .padding(horizontal = 8.dp, vertical = 12.dp),
+                .padding(horizontal = 8.dp, vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             IconButton(onClick = onBack) {
@@ -561,13 +560,12 @@ private fun CreateArchiveFlow(
     Column(
         modifier = Modifier.fillMaxSize()
     ) {
-        // Sticky Top App Bar
+        // Sticky Top App Bar (starts immediately below notch, no extra statusBarsPadding)
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .background(MaterialTheme.colorScheme.background)
-                .statusBarsPadding()
-                .padding(horizontal = 8.dp, vertical = 12.dp),
+                .padding(horizontal = 8.dp, vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             IconButton(onClick = onBack) {
@@ -1996,13 +1994,12 @@ private fun ExtractArchiveFlow(
                 .fillMaxSize()
                 .imePadding() // Placed before scrollable content for instant keyboard adjustment!
         ) {
-            // Sticky Top App Bar
+            // Sticky Top App Bar (starts immediately below notch, no extra statusBarsPadding)
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .background(MaterialTheme.colorScheme.background)
-                    .statusBarsPadding()
-                    .padding(horizontal = 8.dp, vertical = 12.dp),
+                    .padding(horizontal = 8.dp, vertical = 6.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 IconButton(onClick = onBack) {
@@ -2496,70 +2493,71 @@ private fun DecryptedGalleryViewer(
         }
     }
 
-    Column(
+    Box(
         modifier = Modifier
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.background)
     ) {
-        // Sticky Top Bar (Adapts smoothly to Selection Mode!)
-        if (isSelecting) {
-            // Selection Mode Header
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(MaterialTheme.colorScheme.surfaceContainerHighest)
-                    .statusBarsPadding()
-                    .padding(horizontal = 8.dp, vertical = 10.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                IconButton(onClick = { selectedObjectIds.clear() }) {
-                    Icon(
-                        imageVector = ZarcIcons.Close,
-                        contentDescription = "Close selection",
-                        tint = MaterialTheme.colorScheme.onSurface
-                    )
-                }
-
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = "${selectedObjectIds.size} selected",
-                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
-                        color = MaterialTheme.colorScheme.onSurface
-                    )
-                    val selectedBytes = manifest.objects.filter { selectedObjectIds.contains(it.id) }.sumOf { it.sanitizedSize }
-                    Text(
-                        text = formatBytes(selectedBytes),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-
-                TextButton(
-                    onClick = {
-                        if (selectedObjectIds.size == manifest.objects.size) {
-                            selectedObjectIds.clear()
-                        } else {
-                            selectedObjectIds.clear()
-                            selectedObjectIds.addAll(manifest.objects.map { it.id })
-                        }
-                    }
+        Column(
+            modifier = Modifier.fillMaxSize()
+        ) {
+            // Sticky Top Bar (starts immediately below notch, no extra statusBarsPadding)
+            if (isSelecting) {
+                // Selection Mode Header
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(MaterialTheme.colorScheme.surfaceContainerHighest)
+                        .padding(horizontal = 8.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text(
-                        text = if (selectedObjectIds.size == manifest.objects.size) "Deselect all" else "Select all",
-                        style = MaterialTheme.typography.labelMedium
-                    )
+                    IconButton(onClick = { selectedObjectIds.clear() }) {
+                        Icon(
+                            imageVector = ZarcIcons.Close,
+                            contentDescription = "Close selection",
+                            tint = MaterialTheme.colorScheme.onSurface
+                        )
+                    }
+
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "${selectedObjectIds.size} selected",
+                            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        val selectedBytes = manifest.objects.filter { selectedObjectIds.contains(it.id) }.sumOf { it.sanitizedSize }
+                        Text(
+                            text = formatBytes(selectedBytes),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+
+                    TextButton(
+                        onClick = {
+                            if (selectedObjectIds.size == manifest.objects.size) {
+                                selectedObjectIds.clear()
+                            } else {
+                                selectedObjectIds.clear()
+                                selectedObjectIds.addAll(manifest.objects.map { it.id })
+                            }
+                        }
+                    ) {
+                        Text(
+                            text = if (selectedObjectIds.size == manifest.objects.size) "Deselect all" else "Select all",
+                            style = MaterialTheme.typography.labelMedium
+                        )
+                    }
                 }
-            }
-        } else {
-            // Normal Gallery Header
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(MaterialTheme.colorScheme.background)
-                    .statusBarsPadding()
-                    .padding(horizontal = 8.dp, vertical = 10.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
+            } else {
+                // Normal Gallery Header
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(MaterialTheme.colorScheme.background)
+                        .padding(horizontal = 8.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
                 IconButton(onClick = onClose) {
                     Icon(
                         imageVector = ZarcIcons.Back,
@@ -2704,12 +2702,13 @@ private fun DecryptedGalleryViewer(
                             )
                         }
 
-                        // Bottom file info badge
-                        Surface(
+                        // Bottom file info badge (non-clickable so tap registers on parent card)
+                        Box(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .align(Alignment.BottomCenter),
-                            color = Color.Black.copy(alpha = 0.55f)
+                                .align(Alignment.BottomCenter)
+                                .background(Color.Black.copy(alpha = 0.55f))
+                                .padding(horizontal = 4.dp, vertical = 2.dp)
                         ) {
                             Text(
                                 text = obj.originalName,
@@ -2717,7 +2716,6 @@ private fun DecryptedGalleryViewer(
                                 color = Color.White,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp),
                                 fontSize = 8.sp
                             )
                         }
@@ -2794,6 +2792,7 @@ private fun DecryptedGalleryViewer(
         )
     }
 }
+}
 
 // -----------------------------------------------------------------------------
 // 8. FULL-SCREEN GALLERY VIEWER WITH HORIZONTAL PAGER & MINI-ROLL
@@ -2812,10 +2811,26 @@ private fun DecryptedPhotoViewer(
     val scope = rememberCoroutineScope()
 
     val pagerState = rememberPagerState(initialPage = initialIndex) { manifest.objects.size }
-    val currentObject = manifest.objects.getOrNull(pagerState.currentPage) ?: return
+    LaunchedEffect(initialIndex) {
+        if (pagerState.currentPage != initialIndex) {
+            pagerState.scrollToPage(initialIndex)
+        }
+    }
 
-    var chromeVisible by remember { mutableStateOf(true) }
-    var showInfoSheet by remember { mutableStateOf(false) }
+    Dialog(
+        onDismissRequest = onClose,
+        properties = DialogProperties(
+            usePlatformDefaultWidth = false,
+            decorFitsSystemWindows = false
+        )
+    ) {
+        val currentObject = manifest.objects.getOrNull(pagerState.currentPage) ?: run {
+            onClose()
+            return@Dialog
+        }
+
+        var chromeVisible by remember { mutableStateOf(true) }
+        var showInfoSheet by remember { mutableStateOf(false) }
 
     // In-memory cache for decrypted bitmaps during viewing session
     val bitmapCache = remember { mutableMapOf<String, Bitmap>() }
@@ -3159,6 +3174,7 @@ private fun DecryptedPhotoViewer(
                 }
             )
         }
+    }
     }
 }
 
