@@ -2,10 +2,10 @@
 
 ## 1. Executive Summary
 
-PROJECT ZARC specifies a high-security, privacy-preserving photo archive format. In addition to standalone `.zarc` archives, the format supports a **Polyglot JPEG + Custom Container** architecture (`Album.jpg`).
+PROJECT ZARC specifies a high-security, privacy-preserving photo archive format. In addition to standalone `.zarc` archives, the format supports a **Polyglot JPEG + Custom Container** architecture (`<custom_name>.jpg`).
 
 Under this architecture:
-1. **Outer Appearance**: The container file is physically named `Album.jpg`. Any stock photo viewer, Android gallery, Google Photos backup, or desktop viewer decodes and displays the metadata-sanitised cover photo without error or warning.
+1. **Outer Appearance**: The container file can be given any custom name with a `.jpg` extension (or `.zarc`). Any stock photo viewer, Android gallery, Google Photos backup, or desktop viewer decodes and displays the metadata-sanitised cover photo without error or warning.
 2. **Inner Security**: Immediately following the JPEG End-Of-Image (`0xFF, 0xD9`) marker, the file contains an encrypted, authenticated binary container (`ZARC` specification) protecting embedded photos, private manifests, filenames, capture timestamps, and dimensions.
 3. **No Blind Scanning**: The locator mechanism is $O(1)$ deterministic from the file footer. It does not scan for magic bytes across compressed entropy.
 4. **Zero-Knowledge**: All private assets, filenames, and manifest structures are encrypted with **Argon2id** key derivation and **XChaCha20-Poly1305** authenticated streaming AEAD.
@@ -15,7 +15,7 @@ Under this architecture:
 
 ## 2. Physical File Layout
 
-### Polyglot JPEG Architecture (`Album.jpg`)
+### Polyglot JPEG Architecture (`<custom_name>.jpg`)
 
 ```text
 +-------------------------------------------------------------------------+
@@ -148,7 +148,7 @@ The JPEG specification (ISO/IEC 10918-1) designates marker `0xFF, 0xD9` (EOI) as
 | Target Platform / Application | Image Decoding Engine | Compatibility Status | Notes |
 |---|---|---|---|
 | **Android Stock Gallery** | Android Skia / libjpeg-turbo | **Full Support** | Decodes cover photo instantly; renders thumbnail & full screen |
-| **Google Photos (Android)** | Google Skia ImageDecoder | **Full Support** | Backs up `Album.jpg` as standard photo; displays cover |
+| **Google Photos (Android)** | Google Skia ImageDecoder | **Full Support** | Backs up disguised `.jpg` container as standard photo; displays cover |
 | **Android Files (AOSP/Pixel)** | Android `BitmapFactory` | **Full Support** | Generates system thumbnail from cover photo |
 | **Windows Photos / Paint** | Windows Imaging Component (WIC) | **Full Support** | Opens cover cleanly without corruption alerts |
 | **macOS Preview / Finder** | Apple ImageIO framework | **Full Support** | Renders QuickLook preview and full view of cover |

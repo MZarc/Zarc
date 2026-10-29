@@ -50,7 +50,7 @@ Most commercial "photo locker" and "calculator vault" applications rely on **sec
 
 ## 🗃️ PROJECT ZARC — Disguised Polyglot Photo Archives
 
-One of Zarc's flagship capabilities is **Disguised Polyglot Archives** (`Album.jpg`). This engine allows you to package dozens or hundreds of encrypted private photos inside a single, genuine JPEG picture that opens normally in any standard photo viewer.
+One of Zarc's flagship capabilities is **Disguised Polyglot Archives** (`<custom_name>.jpg` or `.zarc`). This engine allows you to package dozens or hundreds of encrypted private photos inside a single, genuine JPEG picture (with any custom file name you choose) that opens normally in any standard photo viewer.
 
 ```mermaid
 flowchart TD
