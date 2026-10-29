@@ -3,7 +3,10 @@ package com.zarc.vault.ui
 import android.app.DatePickerDialog
 import android.app.TimePickerDialog
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.togetherWith
+import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.fadeIn
@@ -289,16 +292,29 @@ fun GalleryApp(
                     )
                 }
 
-                when (tab) {
-                    GalleryTab.PHOTOS -> PhotosScreen(state, viewModel)
-                    GalleryTab.ALBUMS -> AlbumsScreen(state, viewModel)
-                    GalleryTab.PRIVATE -> PrivateScreen(state, viewModel, onUnlockPrivate)
-                    GalleryTab.BIN -> BinScreen(state, viewModel)
-                    GalleryTab.SETTINGS -> SettingsScreen(state, viewModel)
-                    GalleryTab.ARCHIVE -> ArchiveScreen(
-                        onBack = { viewModel.selectTab(GalleryTab.PHOTOS) },
-                        viewModel = viewModel,
-                    )
+                AnimatedContent(
+                    targetState = tab,
+                    transitionSpec = {
+                        (fadeIn(animationSpec = tween(220, easing = FastOutSlowInEasing)) +
+                            scaleIn(initialScale = 0.97f, animationSpec = tween(220, easing = FastOutSlowInEasing)))
+                            .togetherWith(
+                                fadeOut(animationSpec = tween(180, easing = FastOutSlowInEasing)) +
+                                scaleOut(targetScale = 0.98f, animationSpec = tween(180, easing = FastOutSlowInEasing))
+                            )
+                    },
+                    label = "tab_transition",
+                ) { targetTab ->
+                    when (targetTab) {
+                        GalleryTab.PHOTOS -> PhotosScreen(state, viewModel)
+                        GalleryTab.ALBUMS -> AlbumsScreen(state, viewModel)
+                        GalleryTab.PRIVATE -> PrivateScreen(state, viewModel, onUnlockPrivate)
+                        GalleryTab.BIN -> BinScreen(state, viewModel)
+                        GalleryTab.SETTINGS -> SettingsScreen(state, viewModel)
+                        GalleryTab.ARCHIVE -> ArchiveScreen(
+                            onBack = { viewModel.selectTab(GalleryTab.PHOTOS) },
+                            viewModel = viewModel,
+                        )
+                    }
                 }
             }
         }
@@ -356,80 +372,86 @@ fun GalleryApp(
         }
 
         // The viewer covers everything, including the floating bar.
-        state.viewerItem?.let { item ->
-            if (state.splitMode) {
-                SplitViewerScreen(
-                    primary = item,
-                    secondary = state.splitItem,
-                    repository = viewModel.repository,
-                    candidates = state.viewerCandidates,
-                    onPickPrimary = viewModel::setViewerItem,
-                    onPickSecondary = viewModel::setSplitItem,
-                    onSwap = viewModel::swapSplitPanes,
-                    onClose = viewModel::closeSplitView,
-                )
-            } else {
-                val viewerList = when (tab) {
-                    GalleryTab.PHOTOS -> state.roll
-                    GalleryTab.ALBUMS -> state.albumItems
-                    GalleryTab.PRIVATE -> state.privateItems
-                    GalleryTab.BIN -> state.binnedItems
-                    else -> listOf(item)
-                }.ifEmpty { listOf(item) }
+        AnimatedVisibility(
+            visible = state.viewerItem != null,
+            enter = fadeIn(tween(220, easing = FastOutSlowInEasing)) + scaleIn(initialScale = 0.90f, animationSpec = tween(240, easing = FastOutSlowInEasing)),
+            exit = fadeOut(tween(180, easing = FastOutSlowInEasing)) + scaleOut(targetScale = 0.92f, animationSpec = tween(200, easing = FastOutSlowInEasing)),
+        ) {
+            state.viewerItem?.let { item ->
+                if (state.splitMode) {
+                    SplitViewerScreen(
+                        primary = item,
+                        secondary = state.splitItem,
+                        repository = viewModel.repository,
+                        candidates = state.viewerCandidates,
+                        onPickPrimary = viewModel::setViewerItem,
+                        onPickSecondary = viewModel::setSplitItem,
+                        onSwap = viewModel::swapSplitPanes,
+                        onClose = viewModel::closeSplitView,
+                    )
+                } else {
+                    val viewerList = when (tab) {
+                        GalleryTab.PHOTOS -> state.roll
+                        GalleryTab.ALBUMS -> state.albumItems
+                        GalleryTab.PRIVATE -> state.privateItems
+                        GalleryTab.BIN -> state.binnedItems
+                        else -> listOf(item)
+                    }.ifEmpty { listOf(item) }
 
-                ViewerScreen(
-                    initialItem = item,
-                    items = viewerList,
-                    isPrivate = item.isPrivate,
-                    repository = viewModel.repository,
-                    onClose = viewModel::closeViewer,
-                    onOpenWith = onOpenWith,
-                    onOpenInSplit = viewModel::openSplitView,
-                    onDelete = { target ->
-                        deleteConfirmItem = target
-                    },
-                    onRestore = if (item.isDeleted) {
-                        { target ->
-                            if (target.isPrivate) {
-                                viewModel.repository.restorePrivateFromBin(listOf(target.id))
-                            } else {
-                                viewModel.repository.restoreFromBin(listOf(target.id))
+                    ViewerScreen(
+                        initialItem = item,
+                        items = viewerList,
+                        isPrivate = item.isPrivate,
+                        repository = viewModel.repository,
+                        onClose = viewModel::closeViewer,
+                        onOpenWith = onOpenWith,
+                        onOpenInSplit = viewModel::openSplitView,
+                        onDelete = { target ->
+                            deleteConfirmItem = target
+                        },
+                        onRestore = if (item.isDeleted) {
+                            { target ->
+                                if (target.isPrivate) {
+                                    viewModel.repository.restorePrivateFromBin(listOf(target.id))
+                                } else {
+                                    viewModel.repository.restoreFromBin(listOf(target.id))
+                                }
+                                viewModel.closeViewer()
+                                viewModel.refresh()
                             }
-                            viewModel.closeViewer()
-                            viewModel.refresh()
-                        }
-                    } else null,
-                    onMoveToPrivate = if (!item.isPrivate && !item.isDeleted) {
-                        { target -> viewModel.moveItemToPrivate(target) }
-                    } else null,
-                    onSetAsCover = if (state.albumId != null && !item.isDeleted) {
-                        { target -> viewModel.setAlbumCover(state.albumId!!, target.id) }
-                    } else null,
-                    onReencrypt = { target -> viewModel.reencrypt(target) },
-                    onRename = { target ->
-                        renameTarget = EditTarget(
-                            ids = listOf(target.id),
-                            initialName = target.name,
-                            initialDate = target.takenAt,
-                            isPrivate = target.isPrivate,
-                            selectionMode = false,
-                            item = target,
-                        )
-                    },
-                    onEditDate = { target ->
-                        dateTarget = EditTarget(
-                            ids = listOf(target.id),
-                            initialName = target.name,
-                            initialDate = target.takenAt,
-                            isPrivate = target.isPrivate,
-                            selectionMode = false,
-                            item = target,
-                        )
-                    },
-                    onToggleFavorite = { target ->
-                        viewModel.setItemFavorite(target, !target.isFavorite)
-                    },
-                )
+                        } else null,
+                        onMoveToPrivate = if (!item.isPrivate && !item.isDeleted) {
+                            { target -> viewModel.moveItemToPrivate(target) }
+                        } else null,
+                        onSetAsCover = if (state.albumId != null && !item.isDeleted) {
+                            { target -> viewModel.setAlbumCover(state.albumId!!, target.id) }
+                        } else null,
+                        onReencrypt = { target -> viewModel.reencrypt(target) },
+                        onRename = { target ->
+                            renameTarget = EditTarget(
+                                ids = listOf(target.id),
+                                initialName = target.name,
+                                initialDate = target.takenAt,
+                                isPrivate = target.isPrivate,
+                                selectionMode = false,
+                                item = target,
+                            )
+                        },
+                        onEditDate = { target ->
+                            dateTarget = EditTarget(
+                                ids = listOf(target.id),
+                                initialName = target.name,
+                                initialDate = target.takenAt,
+                                isPrivate = target.isPrivate,
+                                selectionMode = false,
+                                item = target,
+                            )
+                        },
+                        onToggleFavorite = { target ->
+                            viewModel.setItemFavorite(target, !target.isFavorite)
+                        },
+                    )
+                }
             }
         }
     }
@@ -455,7 +477,6 @@ fun GalleryApp(
                 menuOpen = false
                 viewModel.selectTab(it)
             },
-            onImportSamples = viewModel::importSamples,
         )
     }
     if (editOpen) {
@@ -793,23 +814,23 @@ private fun GalleryTopBar(
                     }
                 }
                 Column(
-                    modifier = Modifier
-                        .weight(1f)
-                        .clip(RoundedCornerShape(8.dp))
-                        .combinedClickable(
-                            enabled = onHeaderLongClick != null,
-                            onClick = {},
-                            onLongClick = {
-                                ZarcHaptics.longPress(context)
-                                onHeaderLongClick?.invoke()
-                            },
-                        ),
+                    modifier = Modifier.weight(1f),
                 ) {
                     Text(
                         text = title,
                         style = MaterialTheme.typography.headlineSmall,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(6.dp))
+                            .combinedClickable(
+                                enabled = onHeaderLongClick != null,
+                                onClick = {},
+                                onLongClick = {
+                                    ZarcHaptics.longPress(context)
+                                    onHeaderLongClick?.invoke()
+                                },
+                            ),
                     )
                     if (subtitle != null) {
                         Text(
@@ -991,10 +1012,10 @@ private fun ImportButton(onClick: () -> Unit, modifier: Modifier = Modifier) {
         contentAlignment = Alignment.Center,
     ) {
         Icon(
-            imageVector = ZarcIcons.Import,
+            imageVector = ZarcIcons.Add,
             contentDescription = "Import photos and videos",
             tint = Color.White,
-            modifier = Modifier.size(25.dp),
+            modifier = Modifier.size(28.dp),
         )
     }
 }
@@ -1399,7 +1420,7 @@ fun MediaGrid(
             }
 
             // High precision row-level scroll fraction calculation
-            val scrollFraction by remember(totalRows) {
+            val scrollFraction by remember(totalRows, entryToRow) {
                 derivedStateOf {
                     if (!gridState.canScrollForward && gridState.canScrollBackward) {
                         1f
@@ -1410,7 +1431,7 @@ fun MediaGrid(
                         val visibleItems = layoutInfo.visibleItemsInfo
                         if (visibleItems.isEmpty()) return@derivedStateOf 0f
                         val firstVisibleItem = visibleItems.first()
-                        val firstIndex = firstVisibleItem.index.coerceIn(0, entries.size - 1)
+                        val firstIndex = firstVisibleItem.index.coerceIn(0, (entries.size - 1).coerceAtLeast(0))
                         val itemRow = entryToRow.getOrElse(firstIndex) { 0 }
                         val rowHeight = firstVisibleItem.size.height.toFloat().coerceAtLeast(1f)
                         val subRowOffset = (-firstVisibleItem.offset.y.toFloat() / rowHeight).coerceIn(0f, 1f)
@@ -1420,21 +1441,16 @@ fun MediaGrid(
                 }
             }
 
-            // Smooth animated thumb position when naturally scrolling; instantaneous 1:1 response when dragging
-            val animatedFraction by animateFloatAsState(
-                targetValue = scrollFraction,
-                animationSpec = tween(durationMillis = 60),
-                label = "scrollbar_fraction",
-            )
-            val currentFraction = if (isDraggingBar) dragProgress else animatedFraction
+            // Direct 1:1 instantaneous response during scroll or drag to eliminate initial lag & jitter
+            val currentFraction = if (isDraggingBar) dragProgress else scrollFraction
             val usableHeightDp = (maxHeight - topInset - bottomInset - thumbHeightDp).coerceAtLeast(0.dp)
             val thumbOffsetDp = topInset + usableHeightDp * currentFraction
 
             // Active date label: during drag, based on target; during normal scroll, based on top visible item
             val activeItemIndex = if (isDraggingBar) {
-                (dragProgress * (totalItems - 1)).toInt().coerceIn(0, totalItems - 1)
+                (dragProgress * (totalItems - 1)).toInt().coerceIn(0, (totalItems - 1).coerceAtLeast(0))
             } else {
-                gridState.firstVisibleItemIndex.coerceIn(0, totalItems - 1)
+                gridState.firstVisibleItemIndex.coerceIn(0, (totalItems - 1).coerceAtLeast(0))
             }
 
             val activeDateLabel = remember(activeItemIndex, entries) {
@@ -1600,48 +1616,41 @@ fun AlbumsScreen(state: GalleryUiState, viewModel: GalleryViewModel) {
 
     actionAlbum?.let { album ->
         val members = state.index.inAlbum(album.id)
-        ModalBottomSheet(
-            onDismissRequest = { actionAlbum = null },
-            containerColor = MaterialTheme.colorScheme.surfaceContainer,
+        ZarcSheet(
+            onDismiss = { actionAlbum = null },
         ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(bottom = 32.dp),
-            ) {
-                SheetHeader(album.name, plural(members.size, "item"))
-                SheetAction(
-                    icon = ZarcIcons.Edit,
-                    title = "Rename album",
-                    subtitle = "Change the name of this album",
-                    onClick = {
-                        val target = album
-                        actionAlbum = null
-                        renaming = target
-                    },
-                )
-                SheetAction(
-                    icon = ZarcIcons.Albums,
-                    title = "Change cover image",
-                    subtitle = "Choose a photo as album cover",
-                    onClick = {
-                        val target = album
-                        actionAlbum = null
-                        chooseCoverAlbum = target
-                    },
-                )
-                SheetAction(
-                    icon = ZarcIcons.Delete,
-                    title = "Delete album",
-                    subtitle = "Photos and videos inside will remain safe in your photos",
-                    destructive = true,
-                    onClick = {
-                        val target = album
-                        actionAlbum = null
-                        deleteConfirmAlbum = target
-                    },
-                )
-            }
+            SheetHeader(album.name, plural(members.size, "item"))
+            SheetAction(
+                icon = ZarcIcons.Edit,
+                title = "Rename album",
+                subtitle = "Change the name of this album",
+                onClick = {
+                    val target = album
+                    actionAlbum = null
+                    renaming = target
+                },
+            )
+            SheetAction(
+                icon = ZarcIcons.Albums,
+                title = "Change cover image",
+                subtitle = "Choose a photo as album cover",
+                onClick = {
+                    val target = album
+                    actionAlbum = null
+                    chooseCoverAlbum = target
+                },
+            )
+            SheetAction(
+                icon = ZarcIcons.Delete,
+                title = "Delete album",
+                subtitle = "Photos and videos inside will remain safe in your photos",
+                destructive = true,
+                onClick = {
+                    val target = album
+                    actionAlbum = null
+                    deleteConfirmAlbum = target
+                },
+            )
         }
     }
 
@@ -2300,7 +2309,6 @@ private fun MenuSheet(
     state: GalleryUiState,
     onDismiss: () -> Unit,
     onNavigate: (GalleryTab) -> Unit,
-    onImportSamples: () -> Unit,
 ) {
     ZarcSheet(onDismiss = onDismiss) {
         SheetHeader("Menu", "Bin, settings and tools")
@@ -2327,20 +2335,10 @@ private fun MenuSheet(
             chevron = true,
             onClick = { onNavigate(GalleryTab.SETTINGS) },
         )
-        SheetDivider()
-        SheetAction(
-            icon = ZarcIcons.Import,
-            title = "Import sample media",
-            subtitle = "Add synthetic pictures for a quick look",
-            onClick = {
-                onDismiss()
-                onImportSamples()
-            },
-        )
     }
 }
 
-/** The shared bottom sheet container. */
+/** The shared bottom sheet container with scroll affordance & indicator. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun ZarcSheet(
@@ -2348,6 +2346,9 @@ internal fun ZarcSheet(
     content: @Composable ColumnScope.() -> Unit,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val scrollState = rememberScrollState()
+    val scope = rememberCoroutineScope()
+
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
@@ -2355,15 +2356,102 @@ internal fun ZarcSheet(
         contentColor = MaterialTheme.colorScheme.onSurface,
         dragHandle = { BottomSheetDefaults.DragHandle(color = MaterialTheme.colorScheme.outline) },
     ) {
-        Column(
+        Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .heightIn(max = 520.dp)
-                .verticalScroll(rememberScrollState())
-                .navigationBarsPadding()
-                .padding(start = 12.dp, end = 12.dp, bottom = 20.dp),
-            content = content,
-        )
+                .navigationBarsPadding(),
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(scrollState)
+                    .padding(start = 12.dp, end = 14.dp, bottom = 28.dp),
+                ) {
+                content()
+            }
+
+            // Right edge scrollbar thumb when content is scrollable
+            if (scrollState.maxValue > 0) {
+                BoxWithConstraints(
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .fillMaxHeight()
+                        .padding(end = 4.dp, top = 4.dp, bottom = 4.dp),
+                ) {
+                    val trackHeight = maxHeight
+                    val thumbHeight = 36.dp
+                    val usableHeight = (trackHeight - thumbHeight).coerceAtLeast(0.dp)
+                    val fraction = (scrollState.value.toFloat() / scrollState.maxValue.toFloat()).coerceIn(0f, 1f)
+                    val thumbOffset = usableHeight * fraction
+
+                    Box(
+                        modifier = Modifier
+                            .offset(y = thumbOffset)
+                            .width(4.dp)
+                            .height(thumbHeight)
+                            .clip(CircleShape)
+                            .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.55f)),
+                    )
+                }
+            }
+
+            // Bottom gradient fade & "Scroll for more ▾" floating cue
+            androidx.compose.animation.AnimatedVisibility(
+                visible = scrollState.canScrollForward,
+                modifier = Modifier.align(Alignment.BottomCenter),
+                enter = fadeIn(),
+                exit = fadeOut(),
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(
+                            Brush.verticalGradient(
+                                colors = listOf(
+                                    Color.Transparent,
+                                    MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.92f),
+                                    MaterialTheme.colorScheme.surfaceContainerHigh,
+                                )
+                            )
+                        )
+                        .padding(bottom = 6.dp, top = 18.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Surface(
+                        onClick = {
+                            scope.launch {
+                                scrollState.animateScrollTo((scrollState.value + 280).coerceAtMost(scrollState.maxValue))
+                            }
+                        },
+                        shape = RoundedCornerShape(16.dp),
+                        color = MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.95f),
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)),
+                        shadowElevation = 3.dp,
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
+                            Text(
+                                text = "Scroll for more",
+                                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Medium),
+                                color = MaterialTheme.colorScheme.primary,
+                            )
+                            Icon(
+                                imageVector = ZarcIcons.Chevron,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier
+                                    .size(13.dp)
+                                    .graphicsLayer { rotationZ = 90f },
+                            )
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -2657,12 +2745,6 @@ private fun SelectionBottomBar(
                         label = "Delete forever",
                         tint = MaterialTheme.colorScheme.error,
                         onClick = onDelete,
-                    )
-                    SelectionBottomItem(
-                        icon = ZarcIcons.More,
-                        label = "More",
-                        tint = Color.White,
-                        onClick = onMore,
                     )
                 } else {
                     if (tab != GalleryTab.PRIVATE && onFavorite != null) {

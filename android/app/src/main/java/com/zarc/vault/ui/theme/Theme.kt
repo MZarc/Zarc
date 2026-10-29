@@ -33,15 +33,15 @@ val AndikaFontFamily = FontFamily(
  *
  * Dark-first, OLED-optimized palette featuring:
  * - Four surface layers tinted towards the calm midnight anchor (L 10-18, subtle cobalt bias).
- * - Restrained calm accent (Zarc Cobalt 0xFF4CA5FF) serving as an intentional signal.
+ * - Restrained lavender accent (0xFFB389F9) serving as an intentional signal.
  * - Conforming to APCA / WCAG 7:1 contrast for high legibility in sensitive viewing environments.
  * - Zero artificial gradients; clear physical hairlines and concentric elevation.
  */
 private val ZarcDarkColors = darkColorScheme(
-    primary = Color(0xFF4CA5FF),
-    onPrimary = Color(0xFF00274A),
-    primaryContainer = Color(0xFF0E2E54),
-    onPrimaryContainer = Color(0xFFD6E4FF),
+    primary = Color(0xFFB389F9),
+    onPrimary = Color(0xFF24005A),
+    primaryContainer = Color(0xFF421877),
+    onPrimaryContainer = Color(0xFFECD9FF),
     secondary = Color(0xFF7FD4C1),
     onSecondary = Color(0xFF00382F),
     secondaryContainer = Color(0xFF0F3630),
@@ -75,13 +75,13 @@ private val ZarcDarkColors = darkColorScheme(
 /** Domain category colours of the gallery. */
 object ZarcPalette {
     /** Photos & camera roll. */
-    val photos = Color(0xFF4CA5FF)
+    val photos = Color(0xFFB389F9)
 
     /** Encrypted videos. */
     val videos = Color(0xFFF2B36B)
 
     /** Private stealth vault. */
-    val privateArea = Color(0xFFC79BFF)
+    val privateArea = Color(0xFFD6BBFB)
 
     /** 30-day recycle bin. */
     val bin = Color(0xFF8A93A6)

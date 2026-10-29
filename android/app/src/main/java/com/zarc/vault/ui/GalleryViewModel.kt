@@ -530,12 +530,19 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         _state.value = _state.value.copy(viewerItem = null, splitMode = false, splitItem = null)
     }
 
-    /** Show the open item next to another one. */
+    /** Show the open item next to another one (defaults automatically to the next item). */
     fun openSplitView() {
         val current = _state.value
         val item = current.viewerItem ?: return
         if (current.splitMode) return
-        val second = current.viewerCandidates.firstOrNull { it.id != item.id }
+        val list = current.viewerCandidates
+        val currentIndex = list.indexOfFirst { it.id == item.id }
+        val second = if (currentIndex != -1 && list.size > 1) {
+            val nextIndex = (currentIndex + 1) % list.size
+            list[nextIndex]
+        } else {
+            list.firstOrNull { it.id != item.id }
+        }
         _state.value = current.copy(splitMode = true, splitItem = second)
     }
 

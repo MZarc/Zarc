@@ -12,11 +12,34 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.foundation.Image
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.foundation.layout.offset
+import androidx.compose.ui.unit.IntOffset
+import kotlin.math.roundToInt
+import androidx.compose.ui.graphics.TileMode
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculateCentroid
+import androidx.compose.foundation.gestures.calculateCentroidSize
+import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
@@ -32,6 +55,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.border
@@ -573,6 +597,7 @@ private fun ZoomableMedia(
     isPrivate: Boolean,
     maxDimension: Int = 2560,
     onSingleTap: () -> Unit = {},
+    fixedViewportSize: IntSize? = null,
     modifier: Modifier = Modifier,
 ) {
     val cacheKey = "${item.id}@$maxDimension"
@@ -604,8 +629,8 @@ private fun ZoomableMedia(
         modifier = modifier,
         contentAlignment = Alignment.Center,
     ) {
-        val viewportWidth = constraints.maxWidth.toFloat()
-        val viewportHeight = constraints.maxHeight.toFloat()
+        val viewportWidth = fixedViewportSize?.width?.toFloat() ?: constraints.maxWidth.toFloat()
+        val viewportHeight = fixedViewportSize?.height?.toFloat() ?: constraints.maxHeight.toFloat()
         val aspect = when {
             bitmap != null -> bitmap!!.width.toFloat() / bitmap!!.height.coerceAtLeast(1)
             item.width > 0 && item.height > 0 -> item.width.toFloat() / item.height
@@ -657,30 +682,76 @@ private fun ZoomableMedia(
                         translationX = offsetX
                         translationY = offsetY
                     }
-                    .then(
-                        if (scale > 1.05f) {
-                            Modifier.pointerInput(item.id, displayedWidth, displayedHeight) {
-                                detectTransformGestures(panZoomLock = true) { centroid, pan, zoom, _ ->
-                                    animationJob?.cancel()
-                                    val oldScale = scale
-                                    val nextScale = (oldScale * zoom).coerceIn(1f, 6f)
-                                    if (nextScale != oldScale) {
-                                        val factor = nextScale / oldScale
-                                        val centerX = centroid.x - size.width / 2f
-                                        val centerY = centroid.y - size.height / 2f
-                                        offsetX = offsetX * factor + centerX * (1f - factor)
-                                        offsetY = offsetY * factor + centerY * (1f - factor)
+                    .pointerInput(item.id, displayedWidth, displayedHeight) {
+                        awaitEachGesture {
+                            awaitFirstDown(requireUnconsumed = false)
+                            var zoom = 1f
+                            var pan = Offset.Zero
+                            var pastTouchSlop = false
+                            val touchSlop = viewConfiguration.touchSlop
+
+                            do {
+                                val event = awaitPointerEvent()
+                                val pressedPointers = event.changes.filter { it.pressed }
+                                val count = pressedPointers.size
+
+                                if (count >= 2) {
+                                    val zoomChange = event.calculateZoom()
+                                    val panChange = event.calculatePan()
+                                    val centroid = event.calculateCentroid(useCurrent = false)
+
+                                    if (!pastTouchSlop) {
+                                        zoom *= zoomChange
+                                        pan += panChange
+                                        val centroidSize = event.calculateCentroidSize(useCurrent = false)
+                                        val zoomMotion = kotlin.math.abs(1f - zoom) * centroidSize
+                                        val panMotion = pan.getDistance()
+                                        if (zoomMotion > touchSlop || panMotion > touchSlop) {
+                                            pastTouchSlop = true
+                                        }
                                     }
-                                    offsetX += pan.x
-                                    offsetY += pan.y
-                                    scale = nextScale
-                                    clampOffsets(nextScale)
+
+                                    if (pastTouchSlop) {
+                                        animationJob?.cancel()
+                                        val oldScale = scale
+                                        val nextScale = (oldScale * zoomChange).coerceIn(1f, 6f)
+                                        if (nextScale != oldScale) {
+                                            val factor = nextScale / oldScale
+                                            val centerX = centroid.x - size.width / 2f
+                                            val centerY = centroid.y - size.height / 2f
+                                            offsetX = offsetX * factor + centerX * (1f - factor)
+                                            offsetY = offsetY * factor + centerY * (1f - factor)
+                                        }
+                                        offsetX += panChange.x
+                                        offsetY += panChange.y
+                                        scale = nextScale
+                                        clampOffsets(nextScale)
+
+                                        event.changes.forEach { it.consume() }
+                                    }
+                                } else if (count == 1 && scale > 1.05f) {
+                                    val panChange = event.calculatePan()
+                                    if (!pastTouchSlop) {
+                                        pan += panChange
+                                        if (pan.getDistance() > touchSlop) {
+                                            pastTouchSlop = true
+                                        }
+                                    }
+                                    if (pastTouchSlop) {
+                                        animationJob?.cancel()
+                                        offsetX += panChange.x
+                                        offsetY += panChange.y
+                                        clampOffsets(scale)
+                                        event.changes.forEach { it.consume() }
+                                    }
                                 }
+                            } while (event.changes.any { it.pressed })
+
+                            if (scale < 1.05f && scale != 1f) {
+                                animateTo(1f, 0f, 0f)
                             }
-                        } else {
-                            Modifier
                         }
-                    )
+                    }
                     .pointerInput(item.id) {
                         detectTapGestures(
                             onTap = { onSingleTap() },
@@ -703,10 +774,19 @@ private fun ZoomableMedia(
                     },
             )
         } else {
-            Text(
-                text = if (failed) "The media could not be decoded" else "Loading…",
-                color = Color.White,
-            )
+            if (failed) {
+                Text(
+                    text = "The media could not be decoded",
+                    color = Color.White,
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+            } else {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(36.dp),
+                    color = MaterialTheme.colorScheme.primary,
+                    strokeWidth = 3.dp,
+                )
+            }
         }
     }
 }
@@ -1001,6 +1081,11 @@ fun SplitViewerScreen(
         val minRatio = 0.2f
         val totalWidth = constraints.maxWidth
         val totalHeight = constraints.maxHeight
+        val referenceSize = if (wide) {
+            IntSize(totalWidth / 2, totalHeight)
+        } else {
+            IntSize(totalWidth, totalHeight / 2)
+        }
 
         if (wide) {
             Row(Modifier.fillMaxSize()) {
@@ -1012,6 +1097,7 @@ fun SplitViewerScreen(
                     chrome = chrome,
                     isTopPane = true,
                     isBottomPane = true,
+                    referenceSize = referenceSize,
                     onSingleTap = { chrome = !chrome },
                     onChange = { picker = 0 },
                     onPickItem = { idx, item ->
@@ -1022,12 +1108,6 @@ fun SplitViewerScreen(
                         .weight(ratio)
                         .fillMaxHeight(),
                 )
-                SplitDivider(
-                    vertical = false,
-                    onDrag = { delta ->
-                        ratio = (ratio + delta / totalWidth).coerceIn(minRatio, 1f - minRatio)
-                    },
-                )
                 SplitPaneView(
                     item = secondary,
                     candidates = safeCandidates,
@@ -1036,6 +1116,7 @@ fun SplitViewerScreen(
                     chrome = chrome,
                     isTopPane = true,
                     isBottomPane = true,
+                    referenceSize = referenceSize,
                     onSingleTap = { chrome = !chrome },
                     onChange = { picker = 1 },
                     onPickItem = { idx, item ->
@@ -1057,6 +1138,7 @@ fun SplitViewerScreen(
                     chrome = chrome,
                     isTopPane = true,
                     isBottomPane = false,
+                    referenceSize = referenceSize,
                     onSingleTap = { chrome = !chrome },
                     onChange = { picker = 0 },
                     onPickItem = { idx, item ->
@@ -1067,12 +1149,6 @@ fun SplitViewerScreen(
                         .weight(ratio)
                         .fillMaxWidth(),
                 )
-                SplitDivider(
-                    vertical = true,
-                    onDrag = { delta ->
-                        ratio = (ratio + delta / totalHeight).coerceIn(minRatio, 1f - minRatio)
-                    },
-                )
                 SplitPaneView(
                     item = secondary,
                     candidates = safeCandidates,
@@ -1081,6 +1157,7 @@ fun SplitViewerScreen(
                     chrome = chrome,
                     isTopPane = false,
                     isBottomPane = true,
+                    referenceSize = referenceSize,
                     onSingleTap = { chrome = !chrome },
                     onChange = { picker = 1 },
                     onPickItem = { idx, item ->
@@ -1092,6 +1169,33 @@ fun SplitViewerScreen(
                         .fillMaxWidth(),
                 )
             }
+        }
+
+        // Floating Split Divider Overlay (Eliminates the thick black gap between panes)
+        Box(
+            modifier = if (wide) {
+                Modifier
+                    .fillMaxHeight()
+                    .width(36.dp)
+                    .offset { IntOffset((totalWidth * ratio - 18.dp.toPx()).roundToInt(), 0) }
+            } else {
+                Modifier
+                    .fillMaxWidth()
+                    .height(36.dp)
+                    .offset { IntOffset(0, (totalHeight * ratio - 18.dp.toPx()).roundToInt()) }
+            },
+            contentAlignment = Alignment.Center,
+        ) {
+            SplitDivider(
+                vertical = !wide,
+                onDrag = { delta ->
+                    if (wide) {
+                        ratio = (ratio + delta / totalWidth.toFloat()).coerceIn(minRatio, 1f - minRatio)
+                    } else {
+                        ratio = (ratio + delta / totalHeight.toFloat()).coerceIn(minRatio, 1f - minRatio)
+                    }
+                },
+            )
         }
 
         // Top App Bar
@@ -1212,30 +1316,74 @@ private fun SplitDivider(
         }
     }
     Box(
-        modifier = (if (vertical) {
-            Modifier
-                .fillMaxWidth()
-                .height(20.dp)
-        } else {
-            Modifier
-                .width(20.dp)
-                .fillMaxHeight()
-        }).then(dragModifier),
+        modifier = Modifier
+            .fillMaxSize()
+            .then(dragModifier),
         contentAlignment = Alignment.Center,
     ) {
+        // Continuous ultra-thin hairline divider line
         Box(
             modifier = (if (vertical) {
                 Modifier
-                    .width(42.dp)
-                    .height(4.dp)
+                    .fillMaxWidth()
+                    .height(1.dp)
             } else {
                 Modifier
-                    .height(42.dp)
-                    .width(4.dp)
-            })
-                .clip(RoundedCornerShape(2.dp))
-                .background(Color.White.copy(alpha = 0.4f)),
+                    .fillMaxHeight()
+                    .width(1.dp)
+            }).background(
+                if (vertical) {
+                    Brush.horizontalGradient(
+                        listOf(
+                            Color.Transparent,
+                            Color(0xFFB389F9).copy(alpha = 0.4f),
+                            Color.White.copy(alpha = 0.85f),
+                            Color(0xFFB389F9).copy(alpha = 0.4f),
+                            Color.Transparent,
+                        )
+                    )
+                } else {
+                    Brush.verticalGradient(
+                        listOf(
+                            Color.Transparent,
+                            Color(0xFFB389F9).copy(alpha = 0.4f),
+                            Color.White.copy(alpha = 0.85f),
+                            Color(0xFFB389F9).copy(alpha = 0.4f),
+                            Color.Transparent,
+                        )
+                    )
+                }
+            ),
         )
+
+        // Sleek centered grab pill with fixed dimensions
+        Surface(
+            shape = RoundedCornerShape(10.dp),
+            color = Color(0xFF14131A),
+            border = BorderStroke(1.dp, Color(0xFFB389F9).copy(alpha = 0.75f)),
+            shadowElevation = 6.dp,
+            modifier = if (vertical) {
+                Modifier
+                    .width(36.dp)
+                    .height(5.dp)
+            } else {
+                Modifier
+                    .width(5.dp)
+                    .height(36.dp)
+            },
+        ) {
+            Box(contentAlignment = Alignment.Center) {
+                Box(
+                    modifier = (if (vertical) {
+                        Modifier.width(16.dp).height(2.dp)
+                    } else {
+                        Modifier.width(2.dp).height(16.dp)
+                    })
+                        .clip(RoundedCornerShape(1.dp))
+                        .background(Color(0xFFB389F9)),
+                )
+            }
+        }
     }
 }
 
@@ -1249,6 +1397,7 @@ private fun SplitPaneView(
     chrome: Boolean,
     isTopPane: Boolean,
     isBottomPane: Boolean,
+    referenceSize: IntSize? = null,
     onSingleTap: () -> Unit,
     onChange: () -> Unit,
     onPickItem: (Int, MediaItem) -> Unit,
@@ -1264,7 +1413,9 @@ private fun SplitPaneView(
     }
 
     Box(
-        modifier = modifier.background(Color.Black),
+        modifier = modifier
+            .clipToBounds()
+            .background(Color.Black),
         contentAlignment = Alignment.Center,
     ) {
         if (item == null) {
@@ -1310,6 +1461,7 @@ private fun SplitPaneView(
                         isPrivate = pageItem.isPrivate,
                         maxDimension = 1600,
                         onSingleTap = onSingleTap,
+                        fixedViewportSize = referenceSize,
                         modifier = Modifier.fillMaxSize(),
                     )
                 }
@@ -1426,6 +1578,397 @@ private fun SplitPaneView(
     }
 }
 
+/** Safe app icon loader that seamlessly handles AdaptiveIconDrawable, VectorDrawable, and Bitmap on any Android version. */
+@Composable
+private fun AppIconImage(modifier: Modifier = Modifier) {
+    val context = LocalContext.current
+    val appIcon = remember(context) {
+        runCatching {
+            val drawable = context.packageManager.getApplicationIcon(context.packageName)
+            val w = drawable.intrinsicWidth.takeIf { it > 0 } ?: 144
+            val h = drawable.intrinsicHeight.takeIf { it > 0 } ?: 144
+            val bmp = android.graphics.Bitmap.createBitmap(w, h, android.graphics.Bitmap.Config.ARGB_8888)
+            val canvas = android.graphics.Canvas(bmp)
+            drawable.setBounds(0, 0, canvas.width, canvas.height)
+            drawable.draw(canvas)
+            bmp.asImageBitmap()
+        }.getOrNull()
+    }
+
+    if (appIcon != null) {
+        Image(
+            bitmap = appIcon,
+            contentDescription = "Zarc Vault",
+            modifier = modifier,
+        )
+    } else {
+        Box(
+            modifier = modifier.background(MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                imageVector = ZarcIcons.Shield,
+                contentDescription = "Zarc Vault",
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(36.dp),
+            )
+        }
+    }
+}
+
+/** Understated luxury developer credit card with clean typography and minimalist styling. */
+@Composable
+private fun LuxuryCreditPill(
+    onEmailClick: () -> Unit,
+    onWebsiteClick: () -> Unit,
+    onGithubClick: () -> Unit,
+) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(22.dp),
+        color = Color(0xFF14131A),
+        border = BorderStroke(
+            1.dp,
+            Brush.horizontalGradient(
+                listOf(
+                    Color.White.copy(alpha = 0.08f),
+                    Color(0xFFB389F9).copy(alpha = 0.35f),
+                    Color.White.copy(alpha = 0.08f),
+                )
+            ),
+        ),
+        shadowElevation = 4.dp,
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(20.dp),
+        ) {
+            // Tracked uppercase category label
+            Text(
+                text = "DEVELOPED BY",
+                style = MaterialTheme.typography.labelSmall.copy(
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = 2.sp,
+                    fontSize = 11.sp,
+                ),
+                color = Color(0xFFB389F9),
+            )
+
+            Spacer(Modifier.height(6.dp))
+
+            // Author Name
+            Text(
+                text = "Meet Mistry",
+                style = MaterialTheme.typography.titleLarge.copy(
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = (-0.3).sp,
+                ),
+                color = Color.White,
+            )
+
+            Spacer(Modifier.height(4.dp))
+
+            // Subtle philosophy tagline
+            Text(
+                text = "Crafted with zero-knowledge cryptography, privacy, and performance.",
+                style = MaterialTheme.typography.bodySmall,
+                color = Color.White.copy(alpha = 0.65f),
+            )
+
+            Spacer(Modifier.height(18.dp))
+
+            // Action chips: Email, Portfolio, GitHub
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                // Email
+                Surface(
+                    modifier = Modifier
+                        .weight(1f)
+                        .clickable(onClick = onEmailClick),
+                    shape = RoundedCornerShape(12.dp),
+                    color = Color(0xFF1F1D27),
+                    border = BorderStroke(0.8.dp, Color.White.copy(alpha = 0.1f)),
+                ) {
+                    Row(
+                        modifier = Modifier.padding(vertical = 10.dp, horizontal = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.Center,
+                    ) {
+                        Icon(ZarcIcons.Mail, contentDescription = "Email", tint = Color(0xFFB389F9), modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Email", style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold), color = Color.White)
+                    }
+                }
+
+                // Portfolio
+                Surface(
+                    modifier = Modifier
+                        .weight(1f)
+                        .clickable(onClick = onWebsiteClick),
+                    shape = RoundedCornerShape(12.dp),
+                    color = Color(0xFF1F1D27),
+                    border = BorderStroke(0.8.dp, Color.White.copy(alpha = 0.1f)),
+                ) {
+                    Row(
+                        modifier = Modifier.padding(vertical = 10.dp, horizontal = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.Center,
+                    ) {
+                        Icon(ZarcIcons.Globe, contentDescription = "Portfolio", tint = Color(0xFFB389F9), modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Portfolio", style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold), color = Color.White)
+                    }
+                }
+
+                // GitHub
+                Surface(
+                    modifier = Modifier
+                        .weight(1f)
+                        .clickable(onClick = onGithubClick),
+                    shape = RoundedCornerShape(12.dp),
+                    color = Color(0xFF1F1D27),
+                    border = BorderStroke(0.8.dp, Color.White.copy(alpha = 0.1f)),
+                ) {
+                    Row(
+                        modifier = Modifier.padding(vertical = 10.dp, horizontal = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.Center,
+                    ) {
+                        Icon(ZarcIcons.Code, contentDescription = "GitHub", tint = Color(0xFFB389F9), modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("GitHub", style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold), color = Color.White)
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** Comprehensive guide explaining how to stealthily access and unlock Private Vault. */
+@Composable
+fun PrivateVaultGuideDialog(onDismiss: () -> Unit) {
+    val now = java.util.Calendar.getInstance()
+    val min = now.get(java.util.Calendar.MINUTE)
+    val h24 = now.get(java.util.Calendar.HOUR_OF_DAY)
+    val mm = "%02d".format(min)
+    val h24Rev = "%02d".format(h24).reversed()
+    val currentPin = "$mm$h24Rev"
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = {
+            Icon(
+                imageVector = ZarcIcons.Shield,
+                contentDescription = null,
+                tint = Color(0xFFB389F9),
+                modifier = Modifier.size(28.dp),
+            )
+        },
+        title = {
+            Text(
+                text = "Private Vault Access Guide",
+                style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold),
+                textAlign = TextAlign.Center,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        },
+        text = {
+            val scrollState = rememberScrollState()
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 420.dp),
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .verticalScroll(scrollState)
+                        .padding(end = 12.dp),
+                    verticalArrangement = Arrangement.spacedBy(14.dp),
+                ) {
+                    Text(
+                        text = "Private Vault is completely concealed to ensure Plausible Deniability. It leaves no trace on your screen until deliberately activated.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+
+                    // Step 1: The Secret Entrance Gesture
+                    Card(
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh),
+                        shape = RoundedCornerShape(16.dp),
+                    ) {
+                        Column(Modifier.padding(14.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Surface(
+                                    shape = CircleShape,
+                                    color = MaterialTheme.colorScheme.primary.copy(alpha = 0.16f),
+                                    modifier = Modifier.size(28.dp),
+                                ) {
+                                    Box(contentAlignment = Alignment.Center) {
+                                        Text("1", style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold), color = MaterialTheme.colorScheme.primary)
+                                    }
+                                }
+                                Spacer(Modifier.width(10.dp))
+                                Text(
+                                    text = "Secret Header Long-Press",
+                                    style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                                )
+                            }
+                            Spacer(Modifier.height(8.dp))
+                            Text(
+                                text = "On the main gallery screen, long-press directly on the title header text — whether it currently says \"Photos\", \"Videos\", or \"All\". The app will give a subtle haptic vibration and trigger the biometric prompt.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+
+                    // Step 2: Biometric Master Key
+                    Card(
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh),
+                        shape = RoundedCornerShape(16.dp),
+                    ) {
+                        Column(Modifier.padding(14.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Surface(
+                                    shape = CircleShape,
+                                    color = MaterialTheme.colorScheme.primary.copy(alpha = 0.16f),
+                                    modifier = Modifier.size(28.dp),
+                                ) {
+                                    Box(contentAlignment = Alignment.Center) {
+                                        Text("2", style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold), color = MaterialTheme.colorScheme.primary)
+                                    }
+                                }
+                                Spacer(Modifier.width(10.dp))
+                                Text(
+                                    text = "Biometric Vault Authentication",
+                                    style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                                )
+                            }
+                            Spacer(Modifier.height(8.dp))
+                            Text(
+                                text = "Authenticate using your fingerprint or device screen lock. Hardware-backed Android KeyStore unwraps the independent 256-bit Private Master Key to unlock your private media.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+
+                    // Step 3: Stealth Lock (Main App Only)
+                    Card(
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh),
+                        shape = RoundedCornerShape(16.dp),
+                    ) {
+                        Column(Modifier.padding(14.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Surface(
+                                    shape = CircleShape,
+                                    color = MaterialTheme.colorScheme.primary.copy(alpha = 0.16f),
+                                    modifier = Modifier.size(28.dp),
+                                ) {
+                                    Box(contentAlignment = Alignment.Center) {
+                                        Text("3", style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold), color = MaterialTheme.colorScheme.primary)
+                                    }
+                                }
+                                Spacer(Modifier.width(10.dp))
+                                Text(
+                                    text = "Main App Stealth Lock",
+                                    style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                                )
+                            }
+                            Spacer(Modifier.height(8.dp))
+                            Text(
+                                text = "Notice: Stealth Lock is designed for the MAIN app upon launch, not for the Private Vault. When enabled, the main app asks for the dynamic time PIN formula: Minute (MM) + Reversed 24-Hour (HH).",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            Spacer(Modifier.height(6.dp))
+                            Surface(
+                                shape = RoundedCornerShape(8.dp),
+                                color = MaterialTheme.colorScheme.surfaceContainerHighest,
+                            ) {
+                                Text(
+                                    text = "Right now (%02d:%02d) -> App PIN: %s".format(h24, min, currentPin),
+                                    style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                    color = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                                )
+                            }
+                        }
+                    }
+
+                    // Step 4: Plausible Deniability
+                    Card(
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh),
+                        shape = RoundedCornerShape(16.dp),
+                    ) {
+                        Column(Modifier.padding(14.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Surface(
+                                    shape = CircleShape,
+                                    color = MaterialTheme.colorScheme.primary.copy(alpha = 0.16f),
+                                    modifier = Modifier.size(28.dp),
+                                ) {
+                                    Box(contentAlignment = Alignment.Center) {
+                                        Text("4", style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold), color = MaterialTheme.colorScheme.primary)
+                                    }
+                                }
+                                Spacer(Modifier.width(10.dp))
+                                Text(
+                                    text = "Instant Relock & Key Purge",
+                                    style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                                )
+                            }
+                            Spacer(Modifier.height(8.dp))
+                            Text(
+                                text = "Whenever you leave or minimize Zarc, Private Vault keys are immediately wiped from memory. The private tab automatically hides and locks instantly.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+
+                // Matching right edge scrollbar
+                if (scrollState.maxValue > 0) {
+                    BoxWithConstraints(
+                        modifier = Modifier
+                            .align(Alignment.CenterEnd)
+                            .fillMaxHeight()
+                            .padding(vertical = 4.dp),
+                    ) {
+                        val trackHeight = maxHeight
+                        val thumbHeight = 36.dp
+                        val usableHeight = (trackHeight - thumbHeight).coerceAtLeast(0.dp)
+                        val fraction = (scrollState.value.toFloat() / scrollState.maxValue.toFloat()).coerceIn(0f, 1f)
+                        val thumbOffset = usableHeight * fraction
+
+                        Box(
+                            modifier = Modifier
+                                .offset(y = thumbOffset)
+                                .width(4.dp)
+                                .height(thumbHeight)
+                                .clip(CircleShape)
+                                .background(Color(0xFFB389F9).copy(alpha = 0.75f)),
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = onDismiss,
+                shape = RoundedCornerShape(12.dp),
+            ) {
+                Text("Got it")
+            }
+        },
+    )
+}
+
 /**
  * The settings: the security status, the recovery, the rotation and the
  * developer tools.
@@ -1433,9 +1976,14 @@ private fun SplitPaneView(
 @Composable
 fun SettingsScreen(state: GalleryUiState, viewModel: GalleryViewModel) {
     var showStealthGuide by remember { mutableStateOf(false) }
+    var showPrivateVaultGuide by remember { mutableStateOf(false) }
     var showKeyRotationDialog by remember { mutableStateOf(false) }
     var showEmptyBinDialog by remember { mutableStateOf(false) }
     val context = LocalContext.current
+
+    if (showPrivateVaultGuide) {
+        PrivateVaultGuideDialog(onDismiss = { showPrivateVaultGuide = false })
+    }
 
     if (showStealthGuide) {
         StealthGuideDialog(onDismiss = { showStealthGuide = false })
@@ -1517,32 +2065,23 @@ fun SettingsScreen(state: GalleryUiState, viewModel: GalleryViewModel) {
                         .padding(20.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
-                    Box(
+                    AppIconImage(
                         modifier = Modifier
-                            .size(68.dp)
-                            .background(
-                                MaterialTheme.colorScheme.primary.copy(alpha = 0.16f),
-                                CircleShape,
-                            ),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Icon(
-                            imageVector = ZarcIcons.Shield,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.size(36.dp),
-                        )
-                    }
-                    Spacer(Modifier.height(12.dp))
+                            .size(72.dp)
+                            .clip(RoundedCornerShape(18.dp)),
+                    )
+                    Spacer(Modifier.height(14.dp))
                     Text(
                         text = "Zarc Vault",
                         style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold),
+                        textAlign = TextAlign.Center,
                     )
                     Spacer(Modifier.height(4.dp))
                     Text(
                         text = "Zero-Knowledge Hardware-Backed Encrypted Gallery",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center,
                     )
                     Spacer(Modifier.height(14.dp))
                     Row(
@@ -1647,6 +2186,78 @@ fun SettingsScreen(state: GalleryUiState, viewModel: GalleryViewModel) {
             }
         }
 
+        // Private Vault Access Guide Card
+        item {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(20.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceContainer,
+                ),
+            ) {
+                Column(Modifier.padding(16.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(
+                            modifier = Modifier
+                                .size(38.dp)
+                                .background(ZarcPalette.privateArea.copy(alpha = 0.16f), CircleShape),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Icon(
+                                imageVector = ZarcIcons.Shield,
+                                contentDescription = null,
+                                tint = ZarcPalette.privateArea,
+                                modifier = Modifier.size(20.dp),
+                            )
+                        }
+                        Spacer(Modifier.width(12.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                text = "Private Vault Access Guide",
+                                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold),
+                                color = MaterialTheme.colorScheme.onSurface,
+                            )
+                            Text(
+                                text = "Secret gesture & dynamic security key",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+
+                    Spacer(Modifier.height(10.dp))
+
+                    Text(
+                        text = "Private Vault is completely concealed for Plausible Deniability. Learn how to trigger the hidden entrance gesture and decrypt the hardware partition.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+
+                    Spacer(Modifier.height(14.dp))
+
+                    Button(
+                        onClick = {
+                            ZarcHaptics.click(context)
+                            showPrivateVaultGuide = true
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(12.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
+                            contentColor = MaterialTheme.colorScheme.primary,
+                        ),
+                    ) {
+                        Icon(imageVector = ZarcIcons.Info, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            text = "View Secret Access Guide",
+                            style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
+                        )
+                    }
+                }
+            }
+        }
+
         // Vault Storage & Management
         item {
             Card(
@@ -1740,134 +2351,31 @@ fun SettingsScreen(state: GalleryUiState, viewModel: GalleryViewModel) {
             }
         }
 
-        // Developer Credits Card
+        // Ultra-premium Luxury Developer Credit Pill
         item {
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(20.dp),
-                colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.surfaceContainer,
-                ),
-            ) {
-                Column(Modifier.padding(16.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(
-                            imageVector = ZarcIcons.Star,
-                            contentDescription = null,
-                            tint = Color(0xFFFFC44D),
-                            modifier = Modifier.size(20.dp),
-                        )
-                        Spacer(Modifier.width(8.dp))
-                        Text(
-                            text = "Developer Credits",
-                            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold),
-                            color = MaterialTheme.colorScheme.onSurface,
-                        )
+            LuxuryCreditPill(
+                onEmailClick = {
+                    ZarcHaptics.click(context)
+                    runCatching {
+                        val intent = Intent(Intent.ACTION_SENDTO, Uri.parse("mailto:meetzarc@gmail.com"))
+                        context.startActivity(intent)
                     }
-                    Spacer(Modifier.height(12.dp))
-
-                    Text(
-                        text = "Developed by Meet Mistry",
-                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
-                    )
-                    Spacer(Modifier.height(2.dp))
-                    Text(
-                        text = "Crafted with security, privacy, and performance in mind.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-
-                    Spacer(Modifier.height(14.dp))
-
-                    // Email Link
-                    Surface(
-                        shape = RoundedCornerShape(12.dp),
-                        color = MaterialTheme.colorScheme.surfaceContainerHigh,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable {
-                                ZarcHaptics.click(context)
-                                runCatching {
-                                    val intent = Intent(Intent.ACTION_SENDTO, Uri.parse("mailto:meetzarc@gmail.com"))
-                                    context.startActivity(intent)
-                                }
-                            },
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Icon(ZarcIcons.Mail, contentDescription = "Email", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(20.dp))
-                            Spacer(Modifier.width(12.dp))
-                            Column(Modifier.weight(1f)) {
-                                Text("Email", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                Text("meetzarc@gmail.com", style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Medium))
-                            }
-                            Icon(ZarcIcons.OpenWith, contentDescription = null, modifier = Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
+                },
+                onWebsiteClick = {
+                    ZarcHaptics.click(context)
+                    runCatching {
+                        val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://meetmistry.vercel.app"))
+                        context.startActivity(intent)
                     }
-
-                    Spacer(Modifier.height(8.dp))
-
-                    // Website Link
-                    Surface(
-                        shape = RoundedCornerShape(12.dp),
-                        color = MaterialTheme.colorScheme.surfaceContainerHigh,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable {
-                                ZarcHaptics.click(context)
-                                runCatching {
-                                    val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://meetmistry.vercel.app"))
-                                    context.startActivity(intent)
-                                }
-                            },
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Icon(ZarcIcons.Globe, contentDescription = "Website", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(20.dp))
-                            Spacer(Modifier.width(12.dp))
-                            Column(Modifier.weight(1f)) {
-                                Text("Portfolio / Website", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                Text("https://meetmistry.vercel.app", style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Medium))
-                            }
-                            Icon(ZarcIcons.OpenWith, contentDescription = null, modifier = Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
+                },
+                onGithubClick = {
+                    ZarcHaptics.click(context)
+                    runCatching {
+                        val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/MZarc"))
+                        context.startActivity(intent)
                     }
-
-                    Spacer(Modifier.height(8.dp))
-
-                    // GitHub Link
-                    Surface(
-                        shape = RoundedCornerShape(12.dp),
-                        color = MaterialTheme.colorScheme.surfaceContainerHigh,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable {
-                                ZarcHaptics.click(context)
-                                runCatching {
-                                    val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/MZarc"))
-                                    context.startActivity(intent)
-                                }
-                            },
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Icon(ZarcIcons.Code, contentDescription = "GitHub", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(20.dp))
-                            Spacer(Modifier.width(12.dp))
-                            Column(Modifier.weight(1f)) {
-                                Text("GitHub", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                Text("Github/MZarc", style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Medium))
-                            }
-                            Icon(ZarcIcons.OpenWith, contentDescription = null, modifier = Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
-                    }
-                }
-            }
+                },
+            )
         }
 
         // Privacy Guarantee Footer

@@ -29,6 +29,7 @@
 /fuzz/corpus/
 
 # Editors and operating system
+.agents/
 .vscode/
 .idea/
 .DS_Store

@@ -41,6 +41,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.blur
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
@@ -66,6 +67,7 @@ class GalleryActivity : FragmentActivity() {
     private var importingToPrivate = false
     private var isAppUnlockedSession = false
     private var appLockedState by mutableStateOf(false)
+    private var isAppInRecents by mutableStateOf(false)
 
     // System Photo Picker with multi-select support (Samsung Gallery / Android Photo Picker)
     private val pickVisualMediaLauncher = registerForActivityResult(
@@ -125,13 +127,61 @@ class GalleryActivity : FragmentActivity() {
                 }
 
                 Box(Modifier.fillMaxSize()) {
-                    GalleryApp(
-                        viewModel = viewModel,
-                        onImport = { launchPicker(isPrivate = false) },
-                        onImportPrivate = { launchPicker(isPrivate = true) },
-                        onOpenWith = ::openWith,
-                        onUnlockPrivate = ::unlockPrivateArea,
-                    )
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .then(if (isAppInRecents) Modifier.blur(25.dp) else Modifier),
+                    ) {
+                        GalleryApp(
+                            viewModel = viewModel,
+                            onImport = { launchPicker(isPrivate = false) },
+                            onImportPrivate = { launchPicker(isPrivate = true) },
+                            onOpenWith = ::openWith,
+                            onUnlockPrivate = ::unlockPrivateArea,
+                        )
+                    }
+
+                    // Frosted privacy scrim when in recent apps
+                    if (isAppInRecents) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .background(Color(0x9907080A))
+                                .clickable(enabled = false) {},
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Column(
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.Center,
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(76.dp)
+                                        .background(MaterialTheme.colorScheme.surfaceContainerHigh, CircleShape),
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    Icon(
+                                        imageVector = ZarcIcons.Shield,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(40.dp),
+                                    )
+                                }
+                                Spacer(Modifier.height(14.dp))
+                                Text(
+                                    text = "Zarc Vault",
+                                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = androidx.compose.ui.text.font.FontWeight.Bold),
+                                    color = Color.White,
+                                )
+                                Spacer(Modifier.height(4.dp))
+                                Text(
+                                    text = "Hardware-Encrypted Privacy Protected",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = Color.White.copy(alpha = 0.7f),
+                                )
+                            }
+                        }
+                    }
 
                     // App-level biometric lock overlay
                     AnimatedVisibility(
@@ -218,8 +268,24 @@ class GalleryActivity : FragmentActivity() {
         }
     }
 
+    override fun onPause() {
+        super.onPause()
+        isAppInRecents = true
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
+            window.decorView.setRenderEffect(
+                android.graphics.RenderEffect.createBlurEffect(
+                    35f, 35f, android.graphics.Shader.TileMode.MIRROR,
+                ),
+            )
+        }
+    }
+
     override fun onResume() {
         super.onResume()
+        isAppInRecents = false
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
+            window.decorView.setRenderEffect(null)
+        }
         val lockOn = viewModel.state.value.appLockEnabled || viewModel.state.value.stealthLockEnabled
         if (lockOn && !isAppUnlockedSession) {
             appLockedState = true
