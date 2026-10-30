@@ -86,6 +86,7 @@ import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableLongStateOf
@@ -583,6 +584,16 @@ object ViewerImageCache {
     }
 
     fun clear() = cache.evictAll()
+
+    /** Reduce the cache under memory pressure. */
+    fun trim(level: Int) {
+        when {
+            level >= android.content.ComponentCallbacks2.TRIM_MEMORY_COMPLETE -> cache.evictAll()
+            level >= android.content.ComponentCallbacks2.TRIM_MEMORY_MODERATE ->
+                cache.trimToSize(48 * 1024 * 1024 / 4)
+            else -> cache.trimToSize(48 * 1024 * 1024 / 2)
+        }
+    }
 }
 
 /**
@@ -595,10 +606,10 @@ private fun ZoomableMedia(
     repository: GalleryRepository,
     item: MediaItem,
     isPrivate: Boolean,
+    modifier: Modifier = Modifier,
     maxDimension: Int = 2560,
     onSingleTap: () -> Unit = {},
     fixedViewportSize: IntSize? = null,
-    modifier: Modifier = Modifier,
 ) {
     val cacheKey = "${item.id}@$maxDimension"
     var scale by remember(item.id) { mutableFloatStateOf(1f) }
@@ -1397,11 +1408,11 @@ private fun SplitPaneView(
     chrome: Boolean,
     isTopPane: Boolean,
     isBottomPane: Boolean,
+    modifier: Modifier = Modifier,
     referenceSize: IntSize? = null,
     onSingleTap: () -> Unit,
     onChange: () -> Unit,
     onPickItem: (Int, MediaItem) -> Unit,
-    modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
     val filmstripState = rememberLazyListState()
@@ -1932,8 +1943,17 @@ fun PrivateVaultGuideDialog(onDismiss: () -> Unit) {
                     }
                 }
 
-                // Matching right edge scrollbar
-                if (scrollState.maxValue > 0) {
+                // Matching right edge scrollbar. The scroll position changes
+                // on every frame, so the fraction is derived instead of read
+                // directly in composition.
+                val scrollbarFraction by remember {
+                    derivedStateOf {
+                        if (scrollState.maxValue <= 0) null
+                        else (scrollState.value.toFloat() / scrollState.maxValue.toFloat())
+                            .coerceIn(0f, 1f)
+                    }
+                }
+                if (scrollbarFraction != null) {
                     BoxWithConstraints(
                         modifier = Modifier
                             .align(Alignment.CenterEnd)
@@ -1943,8 +1963,7 @@ fun PrivateVaultGuideDialog(onDismiss: () -> Unit) {
                         val trackHeight = maxHeight
                         val thumbHeight = 36.dp
                         val usableHeight = (trackHeight - thumbHeight).coerceAtLeast(0.dp)
-                        val fraction = (scrollState.value.toFloat() / scrollState.maxValue.toFloat()).coerceIn(0f, 1f)
-                        val thumbOffset = usableHeight * fraction
+                        val thumbOffset = usableHeight * (scrollbarFraction ?: 0f)
 
                         Box(
                             modifier = Modifier

@@ -65,12 +65,17 @@ object ZarcNative {
         vaultMasterKey: ByteArray,
     ): Boolean
 
-    /** Re-wraps every data key under a new vault master key. */
+    /**
+     * Re-wraps every data key under a new vault master key.
+     *
+     * Returns `[rotated, unreadable]`: damaged objects are left untouched
+     * instead of blocking the rotation of the rest of the vault.
+     */
     external fun nativeRotateMasterKey(
         oldVaultMasterKey: ByteArray,
         newVaultMasterKey: ByteArray,
         objectsDir: String,
-    ): Int
+    ): IntArray
 
     /** Seals an arbitrary blob under the vault master key. */
     external fun nativeSealBlob(

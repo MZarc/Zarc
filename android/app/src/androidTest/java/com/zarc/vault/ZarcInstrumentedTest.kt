@@ -265,9 +265,12 @@ class ZarcInstrumentedTest {
                 context.noBackupFilesDir.canonicalPath,
             ),
         )
+        // Decrypted export copies are transient and deliberately live in the
+        // cache directory, which the platform also excludes from backups and
+        // may purge at any time.
         assertTrue(
             repository.exportDir.canonicalPath.startsWith(
-                context.noBackupFilesDir.canonicalPath,
+                context.cacheDir.canonicalPath,
             ),
         )
     }

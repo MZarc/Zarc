@@ -62,7 +62,7 @@ All cryptographic primitives are implemented using audited, vendored **libsodium
 | **Key Wrapping** | `crypto_aead_xchacha20poly1305_ietf` | Authenticated envelope encryption for DEKs and index |
 | **Hardware Keymaster** | AES-256-GCM | Master Keystore key bound to device hardware (TEE / StrongBox) |
 | **Archive KDF** | **Argon2id** | Passphrase key derivation (64 MiB memory, 3 passes, 4 lanes) |
-| **Subkey Derivation** | BLAKE2b Subkey KDF | Domain-separated derivation (`zarc.private.v1`) for Private Vault |
+| **Subkey Derivation** | Legacy BLAKE2b Subkey KDF | Old private areas only (`zarc.private.v1`); new private areas use an independent random subkey wrapped by an auth-bound Keystore key |
 | **Memory Sanitization** | Rust `zeroize` & JVM Sweeps | Explicit zeroization of keys and plaintext buffers upon lock |
 
 For detailed design rationale, see [`docs/CRYPTOGRAPHY_DECISION.md`](docs/CRYPTOGRAPHY_DECISION.md) and [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md).

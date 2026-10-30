@@ -186,6 +186,10 @@ class SecurityLabActivity : Activity() {
             val rotated = repository.rotateVaultMasterKey()
             append("=== Vault master key rotation ===")
             append("re-wrapped $rotated object(s)")
+            val skipped = repository.lastRotationSkipped
+            if (skipped > 0) {
+                append("$skipped already-damaged object(s) were left untouched")
+            }
             append("the content of the objects was not re-encrypted")
         } catch (error: Exception) {
             append("rotation failed: ${error.message}")

@@ -8,6 +8,9 @@ use crate::archive::crypto::*;
 use crate::archive::format::*;
 use crate::archive::manifest::*;
 
+/// Upper bound for the encrypted manifest blob.
+const MAX_MANIFEST_BYTES: u64 = 16 * 1024 * 1024;
+
 #[derive(Clone)]
 pub struct UnlockedArchive {
     pub archive_path: PathBuf,
@@ -48,11 +51,19 @@ pub fn read_outer_cover_jpeg(archive_path: &Path) -> Result<Option<Vec<u8>>, Str
     if footer.zarc_offset > file_len {
         return Err("Malformed container: zarc_offset exceeds file size".into());
     }
+    if footer.zarc_offset > MAX_OUTER_COVER_BYTES {
+        return Err(format!(
+            "Outer cover is too large ({} bytes, limit {})",
+            footer.zarc_offset, MAX_OUTER_COVER_BYTES
+        ));
+    }
 
     file.seek(SeekFrom::Start(0))
         .map_err(|e| format!("Failed to seek to cover JPEG: {}", e))?;
 
-    let mut cover_bytes = vec![0u8; footer.zarc_offset as usize];
+    let cover_len = usize::try_from(footer.zarc_offset)
+        .map_err(|_| "Outer cover size does not fit in memory".to_string())?;
+    let mut cover_bytes = vec![0u8; cover_len];
     file.read_exact(&mut cover_bytes)
         .map_err(|e| format!("Failed to read cover JPEG bytes: {}", e))?;
 
@@ -155,8 +166,16 @@ pub fn unlock_archive(archive_path: &Path, passphrase: &[u8]) -> Result<Unlocked
     if footer.manifest_len < AEAD_NONCE_LEN as u64 + AEAD_TAG_LEN as u64 {
         return Err("Invalid manifest length in footer".into());
     }
+    if footer.manifest_len > MAX_MANIFEST_BYTES {
+        return Err(format!(
+            "Archive manifest is too large ({} bytes, limit {})",
+            footer.manifest_len, MAX_MANIFEST_BYTES
+        ));
+    }
 
-    let mut manifest_disk = vec![0u8; footer.manifest_len as usize];
+    let manifest_len = usize::try_from(footer.manifest_len)
+        .map_err(|_| "Manifest size does not fit in memory".to_string())?;
+    let mut manifest_disk = vec![0u8; manifest_len];
     file.read_exact(&mut manifest_disk)
         .map_err(|e| format!("Failed to read manifest payload: {}", e))?;
 
@@ -176,6 +195,11 @@ pub fn unlock_archive(archive_path: &Path, passphrase: &[u8]) -> Result<Unlocked
     )?;
 
     let manifest = ArchiveManifest::from_json_bytes(&manifest_json)?;
+    let payload_start = footer
+        .zarc_offset
+        .checked_add(HEADER_LEN as u64)
+        .ok_or_else(|| "Archive payload start overflow".to_string())?;
+    manifest.validate_payload_bounds(payload_start, footer.manifest_offset)?;
 
     Ok(UnlockedArchive {
         archive_path: archive_path.to_path_buf(),
@@ -186,11 +210,20 @@ pub fn unlock_archive(archive_path: &Path, passphrase: &[u8]) -> Result<Unlocked
     })
 }
 
-/// Decrypt an object directly into in-memory bytes (useful for image previews / thumbnails).
-pub fn extract_object_bytes(
+/// Decrypt an object's chunks in order and hand each authenticated plaintext
+/// chunk to `consume`.
+///
+/// The stream is processed one chunk at a time, so a multi-gigabyte object
+/// never has to be materialized in memory. The total plaintext length is
+/// verified against the validated manifest.
+fn for_each_object_chunk<F>(
     unlocked: &UnlockedArchive,
     object_id: &str,
-) -> Result<Vec<u8>, String> {
+    mut consume: F,
+) -> Result<u64, String>
+where
+    F: FnMut(&[u8]) -> Result<(), String>,
+{
     let obj_index = unlocked
         .manifest
         .objects
@@ -207,8 +240,7 @@ pub fn extract_object_bytes(
     file.seek(SeekFrom::Start(obj.offset))
         .map_err(|e| format!("Failed to seek to object offset: {}", e))?;
 
-    let mut output = Vec::with_capacity(obj.sanitized_size as usize);
-
+    let mut plaintext_len: u64 = 0;
     for chunk_idx in 0..obj.total_chunks {
         let is_last = (chunk_idx == obj.total_chunks - 1) as u8;
 
@@ -235,40 +267,110 @@ pub fn extract_object_bytes(
         aad.push(is_last);
 
         let pt = aead_decrypt(&subkeys.content_key, &nonce, ciphertext, &aad)?;
-        output.extend_from_slice(&pt);
+        if pt.len() != expected_pt_len {
+            return Err(format!(
+                "Chunk {} decrypted to an unexpected length",
+                chunk_idx
+            ));
+        }
+        consume(&pt)?;
+        plaintext_len = plaintext_len
+            .checked_add(pt.len() as u64)
+            .ok_or_else(|| "Extracted object size overflow".to_string())?;
     }
 
+    if plaintext_len != obj.sanitized_size {
+        return Err(format!(
+            "Extracted object '{}' has length {} but the manifest declares {}",
+            object_id, plaintext_len, obj.sanitized_size
+        ));
+    }
+
+    Ok(plaintext_len)
+}
+
+/// Decrypt an object directly into in-memory bytes (useful for image previews / thumbnails).
+///
+/// Only bounded objects may be materialized in memory; use
+/// [`extract_object_to_file`] for arbitrary media.
+pub fn extract_object_bytes(
+    unlocked: &UnlockedArchive,
+    object_id: &str,
+) -> Result<Vec<u8>, String> {
+    let obj = unlocked
+        .manifest
+        .objects
+        .iter()
+        .find(|o| o.id == object_id)
+        .ok_or_else(|| format!("Object id '{}' not found in archive manifest", object_id))?;
+
+    if obj.sanitized_size > MAX_IN_MEMORY_OBJECT_BYTES {
+        return Err(format!(
+            "Object '{}' is too large to extract into memory ({} bytes, limit {})",
+            object_id, obj.sanitized_size, MAX_IN_MEMORY_OBJECT_BYTES
+        ));
+    }
+    let capacity = usize::try_from(obj.sanitized_size)
+        .map_err(|_| "Object size does not fit in memory".to_string())?;
+
+    let mut output = Vec::with_capacity(capacity);
+    for_each_object_chunk(unlocked, object_id, |pt| {
+        output.extend_from_slice(pt);
+        Ok(())
+    })?;
     Ok(output)
 }
 
 /// Decrypt an object and extract it safely to an output file.
+///
+/// Chunks are streamed straight to a hidden staging file; the file is only
+/// renamed into place after the complete authenticated stream has been
+/// written and synced.
 pub fn extract_object_to_file(
     unlocked: &UnlockedArchive,
     object_id: &str,
     output_path: &Path,
 ) -> Result<(), String> {
-    let bytes = extract_object_bytes(unlocked, object_id)?;
+    let file_name = output_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("extracted");
+    let staging_path = output_path.with_file_name(format!(
+        ".{}.tmp_ext_{}_{}",
+        file_name,
+        std::process::id(),
+        fastrand()
+    ));
 
-    let staging_path = output_path.with_extension(format!("tmp_ext_{}", std::process::id()));
-    let mut out_file = OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(&staging_path)
-        .map_err(|e| format!("Failed to create extract output file: {}", e))?;
+    let result = (|| -> Result<(), String> {
+        let mut out_file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&staging_path)
+            .map_err(|e| format!("Failed to create extract output file: {}", e))?;
 
-    out_file
-        .write_all(&bytes)
-        .map_err(|e| format!("Failed to write extracted file: {}", e))?;
-    out_file
-        .sync_all()
-        .map_err(|e| format!("Failed to sync extracted file: {}", e))?;
-    drop(out_file);
+        for_each_object_chunk(unlocked, object_id, |pt| {
+            out_file
+                .write_all(pt)
+                .map_err(|e| format!("Failed to write extracted file: {}", e))
+        })?;
 
-    std::fs::rename(&staging_path, output_path)
-        .map_err(|e| format!("Failed to finalize extracted file: {}", e))?;
+        out_file
+            .sync_all()
+            .map_err(|e| format!("Failed to sync extracted file: {}", e))?;
+        drop(out_file);
 
-    Ok(())
+        std::fs::rename(&staging_path, output_path)
+            .map_err(|e| format!("Failed to finalize extracted file: {}", e))
+    })();
+
+    if result.is_err() {
+        // A failed extraction must not leave plaintext in the destination
+        // directory.
+        let _ = std::fs::remove_file(&staging_path);
+    }
+
+    result
 }
 
 /// Extract all photos from the unlocked archive into the target directory.
@@ -329,4 +431,10 @@ where
     }
 
     Ok(extracted_paths)
+}
+
+fn fastrand() -> u32 {
+    let mut bytes = [0u8; 4];
+    fill_random_bytes(&mut bytes);
+    u32::from_le_bytes(bytes)
 }

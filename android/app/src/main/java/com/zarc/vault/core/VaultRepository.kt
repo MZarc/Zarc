@@ -5,6 +5,8 @@ import com.zarc.vault.keystore.KeystoreFailure
 import com.zarc.vault.keystore.KeystoreKeyManager
 import com.zarc.vault.keystore.KeystoreReport
 import java.io.File
+import java.io.FileOutputStream
+import java.io.IOException
 import java.security.MessageDigest
 import java.security.SecureRandom
 
@@ -27,11 +29,14 @@ class VaultRepository(context: Context) {
     /** The directory that holds the encrypted vault objects. */
     val objectsDir: File = File(appContext.noBackupFilesDir, "vault/objects")
 
-    /** The directory that receives decrypted files. */
-    val exportDir: File = File(appContext.noBackupFilesDir, "vault/export")
+    /** The directory that receives transient decrypted files. */
+    val exportDir: File = File(appContext.cacheDir, "vault_export")
 
     /** The scratch directory used for the self test and for staging. */
     val workDir: File = File(appContext.cacheDir, "vault/work")
+
+    /** The application private vault directory. */
+    private val vaultDir: File get() = File(appContext.noBackupFilesDir, "vault")
 
     /** The passphrase protected copy of the vault master key. */
     val recoveryEnvelopeFile: File = File(appContext.noBackupFilesDir, "keys/vmk.recovery")
@@ -42,6 +47,18 @@ class VaultRepository(context: Context) {
     /** The staged vault master key of a rotation that is in progress. */
     val stagedKeyFile: File = File(appContext.noBackupFilesDir, "keys/vmk.next")
 
+    /** Guards against re-entering rotation recovery from [vaultMasterKey]. */
+    private var handlingRotation = false
+
+    /**
+     * Number of already-damaged objects that the last rotation or recovery
+     * left untouched. A non-zero value means the rest of the vault was rotated
+     * successfully but those object files were unreadable before it started.
+     */
+    @Volatile
+    var lastRotationSkipped: Int = 0
+        private set
+
     /** Create the vault directories with owner-only permissions. */
     fun ensureDirectories() {
         for (directory in listOf(objectsDir, exportDir, workDir)) {
@@ -49,6 +66,30 @@ class VaultRepository(context: Context) {
                 directory.mkdirs()
             }
             restrictToOwner(directory, isDirectory = true)
+        }
+    }
+
+    /**
+     * Remove plaintext leftovers from earlier runs.
+     *
+     * This runs at startup, before any viewer or archive session is active, so
+     * it can safely remove every transient export and session directory.
+     */
+    fun purgeStaleTransientFiles() {
+        ensureDirectories()
+        exportDir.listFiles()?.forEach { it.deleteRecursively() }
+        File(appContext.cacheDir, "exports").listFiles()?.forEach { it.deleteRecursively() }
+        workDir.listFiles()?.forEach { it.deleteRecursively() }
+        appContext.cacheDir.listFiles()?.forEach { entry ->
+            val name = entry.name
+            if (
+                name.startsWith("inspect_") ||
+                name.startsWith("built_") ||
+                name.startsWith("decrypted_session_") ||
+                name.startsWith("cover_")
+            ) {
+                entry.deleteRecursively()
+            }
         }
     }
 
@@ -73,21 +114,23 @@ class VaultRepository(context: Context) {
     /**
      * Return the vault master key, creating and wrapping it on first use.
      *
+     * A rotation that was interrupted is finished before the active key is
+     * returned, so no caller can ever see a vault whose objects and metadata
+     * are split between two keys.
+     *
      * The caller owns the returned array and must zeroize it after use.
      */
+    @Synchronized
     fun vaultMasterKey(): ByteArray {
         ensureDirectories()
+        recoverPendingRotation()
+        return unwrapActiveVaultMasterKey()
+    }
+
+    /** Unwrap the active vault master key without running rotation recovery. */
+    private fun unwrapActiveVaultMasterKey(): ByteArray {
         val state = keystore.ensureKey()
         val wrapped = keystore.wrappedKeyFile
-        if (state.created && !wrapped.exists() && hasStoredObjects()) {
-            // The Keystore key was lost while the vault still holds objects.
-            // Starting over would silently orphan them, so the vault reports
-            // that it needs the recovery passphrase instead.
-            throw KeystoreFailure(
-                "the Android Keystore key was lost; the vault can only be opened " +
-                    "with the recovery passphrase",
-            )
-        }
         if (state.created && wrapped.exists()) {
             // The Keystore key was lost (for example because the user cleared
             // the keystore or the device was reset) and has just been
@@ -100,13 +143,22 @@ class VaultRepository(context: Context) {
                     "vault is unrecoverable",
             )
         }
+        if (!wrapped.exists() && hasStoredObjects()) {
+            // The wrapped key disappeared while the vault still holds
+            // objects. Generating a fresh master key here would silently
+            // orphan every object, so fail closed instead.
+            throw KeystoreFailure(
+                "the wrapped vault master key is missing while the vault still " +
+                    "holds objects; the vault can only be opened with the " +
+                    "recovery passphrase",
+            )
+        }
         if (!wrapped.exists()) {
             val fresh = ByteArray(KeystoreKeyManager.VAULT_MASTER_KEY_BYTES)
             SecureRandom().nextBytes(fresh)
             val wrappedMaterial = keystore.wrapVaultMasterKey(fresh)
             try {
-                wrapped.parentFile?.mkdirs()
-                wrapped.writeBytes(wrappedMaterial)
+                writeFileAtomically(wrapped, wrappedMaterial)
                 restrictToOwner(wrapped, isDirectory = false)
             } finally {
                 fresh.fill(0)
@@ -191,9 +243,9 @@ class VaultRepository(context: Context) {
             val envelope = ZarcNative.nativeCreateRecoveryEnvelope(key, passphraseBytes)
             val witness = ZarcNative.nativeCreateRecoveryWitness(key)
             recoveryEnvelopeFile.parentFile?.mkdirs()
-            recoveryEnvelopeFile.writeBytes(envelope)
+            writeFileAtomically(recoveryEnvelopeFile, envelope)
             restrictToOwner(recoveryEnvelopeFile, isDirectory = false)
-            recoveryWitnessFile.writeBytes(witness)
+            writeFileAtomically(recoveryWitnessFile, witness)
             restrictToOwner(recoveryWitnessFile, isDirectory = false)
             true
         } finally {
@@ -241,40 +293,59 @@ class VaultRepository(context: Context) {
     /**
      * Rotate the vault master key.
      *
-     * Every object keeps its content; only the wrapping of its data key is
-     * redone. The new key is staged before the rotation and committed after
-     * it, so an interrupted rotation can be finished on the next start.
+     * Every normal and binned object keeps its content; only the wrapping of
+     * its data key is redone. The sealed index and the sealed thumbnails are
+     * re-sealed under the new key as well. The new key is staged before the
+     * rotation and committed after it, so an interrupted rotation can be
+     * finished on the next start.
+     *
+     * Recovery is deliberately refused while a passphrase envelope exists:
+     * the envelope is bound to the current master key and can only be
+     * recreated with the user's passphrase. Disable recovery before rotating
+     * and enable it again afterwards.
      *
      * @return the number of objects that were re-wrapped.
      */
+    @Synchronized
     fun rotateVaultMasterKey(): Int {
         ensureDirectories()
-        val oldKey = vaultMasterKey()
+        if (hasRecovery()) {
+            throw KeystoreFailure(
+                "recovery is enabled; disable recovery before rotating the " +
+                    "master key and enable it again afterwards",
+            )
+        }
+        if (hasPendingPrivateMigration()) {
+            throw KeystoreFailure(
+                "the private area still uses the legacy key hierarchy; unlock " +
+                    "the private area once to finish its migration before " +
+                    "rotating the master key",
+            )
+        }
+
+        // Finish any earlier rotation before starting a new one. Otherwise the
+        // staged key would be overwritten and the partial rotation would have
+        // no way back.
+        recoverPendingRotation()
+
+        val oldKey = unwrapActiveVaultMasterKey()
         val newKey = ByteArray(KeystoreKeyManager.VAULT_MASTER_KEY_BYTES)
         SecureRandom().nextBytes(newKey)
+        lastRotationSkipped = 0
         return try {
             // Stage the new key first: it is wrapped by the Keystore key and
             // written next to the active one.
             val staged = keystore.wrapVaultMasterKey(newKey)
-            stagedKeyFile.parentFile?.mkdirs()
-            stagedKeyFile.writeBytes(staged)
+            writeFileAtomically(stagedKeyFile, staged)
             restrictToOwner(stagedKeyFile, isDirectory = false)
 
-            // Re-wrap the data keys of every object.
-            val rotated = ZarcNative.nativeRotateMasterKey(
-                oldKey,
-                newKey,
-                objectsDir.absolutePath,
-            )
+            val outcome = rotateVaultArtifacts(oldKey, newKey)
+            lastRotationSkipped = outcome.skipped
 
-            // Commit: the staged key becomes the active one.
-            val active = File(appContext.noBackupFilesDir, "keys/vmk.wrapped")
-            if (!stagedKeyFile.renameTo(active)) {
-                throw com.zarc.vault.keystore.KeystoreFailure(
-                    "the rotated vault master key could not be committed",
-                )
-            }
-            rotated
+            // Commit: the staged key becomes the active one. The rename is
+            // atomic on the app's private storage and replaces the old file.
+            commitStagedKey()
+            outcome.rotated
         } finally {
             newKey.fill(0)
             oldKey.fill(0)
@@ -286,33 +357,168 @@ class VaultRepository(context: Context) {
      *
      * @return true when a staged key was found and the rotation was finished.
      */
+    @Synchronized
     fun recoverPendingRotation(): Boolean {
-        if (!stagedKeyFile.exists()) return false
-        val stagedKey = keystore.unwrapVaultMasterKey(stagedKeyFile.readBytes())
-        val activeKey = try {
-            vaultMasterKey()
-        } catch (error: Exception) {
-            stagedKey.fill(0)
-            throw error
-        }
+        if (!stagedKeyFile.exists() || handlingRotation) return false
+        handlingRotation = true
+        lastRotationSkipped = 0
         return try {
-            ZarcNative.nativeRotateMasterKey(
-                activeKey,
-                stagedKey,
-                objectsDir.absolutePath,
-            )
-            val active = File(appContext.noBackupFilesDir, "keys/vmk.wrapped")
-            stagedKeyFile.renameTo(active)
-            true
+            val stagedKey = keystore.unwrapVaultMasterKey(stagedKeyFile.readBytes())
+            val activeKey = unwrapActiveVaultMasterKey()
+            try {
+                val outcome = rotateVaultArtifacts(activeKey, stagedKey)
+                lastRotationSkipped = outcome.skipped
+                commitStagedKey()
+                true
+            } finally {
+                stagedKey.fill(0)
+                activeKey.fill(0)
+            }
         } finally {
-            stagedKey.fill(0)
-            activeKey.fill(0)
+            handlingRotation = false
         }
     }
 
+    /**
+     * Re-wrap every object under [newKey] and re-seal every metadata blob.
+     *
+     * The operation is idempotent: objects that already unwrap with the new
+     * key are skipped, and a blob that is already sealed with the new key is
+     * left untouched. That makes an interrupted rotation safe to repeat.
+     * Objects that were already unreadable are left untouched and counted.
+     */
+    private fun rotateVaultArtifacts(oldKey: ByteArray, newKey: ByteArray): RotationOutcome {
+        var rotated = 0
+        var skipped = 0
+
+        val binDir = File(vaultDir, "bin")
+        for (directory in listOf(objectsDir, binDir)) {
+            val report = ZarcNative.nativeRotateMasterKey(
+                oldKey,
+                newKey,
+                directory.absolutePath,
+            )
+            rotated += report[0]
+            skipped += report[1]
+        }
+
+        resealBlobFile(File(vaultDir, "index.bin"), oldKey, newKey)
+        resealBlobTree(File(vaultDir, "thumbs"), oldKey, newKey)
+        // The recycle bin mixes objects and their sealed thumbnails.
+        resealBlobTree(binDir, oldKey, newKey)
+        return RotationOutcome(rotated = rotated, skipped = skipped)
+    }
+
+    /** Result of re-wrapping every artifact under a new master key. */
+    private data class RotationOutcome(val rotated: Int, val skipped: Int)
+
+    /** Re-seal one blob file under the new key, if it is still under the old one. */
+    private fun resealBlobFile(file: File, oldKey: ByteArray, newKey: ByteArray): Boolean {
+        if (!file.isFile) return false
+        val sealed = runCatching { file.readBytes() }.getOrElse { return false }
+
+        val alreadyNew = runCatching { ZarcNative.nativeOpenBlob(newKey, sealed) }
+        if (alreadyNew.isSuccess) {
+            alreadyNew.getOrNull()?.fill(0)
+            return false
+        }
+
+        val plain = runCatching { ZarcNative.nativeOpenBlob(oldKey, sealed) }.getOrElse {
+            // The blob was already unreadable before the rotation. Leave it
+            // untouched; the index loader quarantines it and the media itself
+            // is still intact.
+            android.util.Log.e("VaultRepo", "a sealed blob could not be re-sealed: ${file.name}", it)
+            return false
+        }
+        try {
+            val resealed = ZarcNative.nativeSealBlob(newKey, plain)
+            writeFileAtomically(file, resealed)
+            return true
+        } finally {
+            plain.fill(0)
+        }
+    }
+
+    /** Re-seal every `.blob` file in a directory tree. */
+    private fun resealBlobTree(directory: File, oldKey: ByteArray, newKey: ByteArray) {
+        val files = directory.listFiles() ?: return
+        for (file in files) {
+            if (file.isDirectory) {
+                resealBlobTree(file, oldKey, newKey)
+            } else if (file.isFile && file.name.endsWith(".blob")) {
+                resealBlobFile(file, oldKey, newKey)
+            }
+        }
+    }
+
+    /** Commit the staged key as the active key, checking the rename result. */
+    private fun commitStagedKey() {
+        val active = keystore.wrappedKeyFile
+        if (!stagedKeyFile.renameTo(active)) {
+            throw KeystoreFailure("the rotated vault master key could not be committed")
+        }
+        restrictToOwner(active, isDirectory = false)
+    }
+
+    /** Whether an interrupted private-area migration still has to be finished. */
+    private fun hasPendingPrivateMigration(): Boolean =
+        File(vaultDir, "private/migrating").exists() ||
+            isLegacyPrivateGate()
+
+    /** Whether the private gate still uses the deterministic legacy subkey. */
+    private fun isLegacyPrivateGate(): Boolean {
+        val gate = File(vaultDir, "private/gate.bin")
+        if (!gate.isFile) return false
+        val magic = ByteArray(4)
+        val read = runCatching { gate.inputStream().use { it.read(magic) } }.getOrDefault(0)
+        if (read < 4) return true
+        return !magic.contentEquals(byteArrayOf('Z'.code.toByte(), 'P'.code.toByte(), 'G'.code.toByte(), '2'.code.toByte()))
+    }
+
     /** Whether the vault directory already holds objects. */
-    fun hasStoredObjects(): Boolean =
-        objectsDir.listFiles()?.any { it.isFile } == true
+    fun hasStoredObjects(): Boolean {
+        return listOf(
+            objectsDir,
+            File(vaultDir, "bin"),
+            File(vaultDir, "private/objects"),
+            File(vaultDir, "private_bin"),
+        ).any { directory ->
+            directory.listFiles()?.any { it.isFile } == true
+        }
+    }
+
+    /**
+     * Remove decrypted files that were staged for an in-app consumer.
+     *
+     * Sharing exports (`cacheDir/exports`) are intentionally left alone here:
+     * another application may still be reading one when Zarc is backgrounded.
+     */
+    fun purgeTransientExports() {
+        exportDir.listFiles()?.forEach { it.deleteRecursively() }
+    }
+
+    /**
+     * Replace [file] only after all of its bytes are on disk. A crash can then
+     * leave the previous file or the complete new file behind, never a
+     * truncated one.
+     */
+    private fun writeFileAtomically(file: File, bytes: ByteArray) {
+        val parent = file.parentFile
+            ?: throw IOException("the file has no parent directory")
+        parent.mkdirs()
+        val temporary = File.createTempFile("${file.name}.", ".tmp", parent)
+        try {
+            FileOutputStream(temporary).use { output ->
+                output.write(bytes)
+                output.fd.sync()
+            }
+            if (!temporary.renameTo(file)) {
+                throw IOException("the file could not be committed")
+            }
+        } finally {
+            if (temporary.exists()) temporary.delete()
+        }
+    }
 
     /**
      * Decrypt an object with an explicitly provided vault master key.
@@ -345,8 +551,7 @@ class VaultRepository(context: Context) {
         keystore.regenerateKey()
         val wrapped = keystore.wrapVaultMasterKey(vaultMasterKey)
         val active = File(appContext.noBackupFilesDir, "keys/vmk.wrapped")
-        active.parentFile?.mkdirs()
-        active.writeBytes(wrapped)
+        writeFileAtomically(active, wrapped)
         restrictToOwner(active, isDirectory = false)
     }
 

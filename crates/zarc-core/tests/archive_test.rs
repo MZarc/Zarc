@@ -213,3 +213,109 @@ fn test_archive_tamper_detection() {
         assert!(extract_object_bytes(&unlocked, "obj_0000").is_err());
     }
 }
+
+#[test]
+fn test_failed_extraction_removes_plaintext_staging_file() {
+    let dir = tempdir().unwrap();
+    let image_path = dir.path().join("photo.jpg");
+    let archive_path = dir.path().join("archive.zarc");
+    let target = dir.path().join("not-a-file");
+    std::fs::create_dir(&target).unwrap();
+
+    let jpeg = create_dummy_jpeg();
+    std::fs::write(&image_path, &jpeg).unwrap();
+    let inputs = vec![ArchiveInputFile {
+        path: image_path,
+        display_name: "photo.jpg".into(),
+        is_cover: true,
+    }];
+    let password = b"ExtractCleanup2026!";
+    create_archive(
+        &archive_path,
+        None,
+        &inputs,
+        password,
+        1,
+        8 * 1024,
+        None::<fn(f32, &str)>,
+    )
+    .unwrap();
+
+    let unlocked = unlock_archive(&archive_path, password).unwrap();
+    let result = extract_object_to_file(&unlocked, "obj_0000", &target);
+    assert!(
+        result.is_err(),
+        "renaming a file over a directory must fail"
+    );
+
+    let leftovers: Vec<String> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.contains(".tmp_ext_"))
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "a failed extraction left plaintext staging files behind: {leftovers:?}"
+    );
+}
+
+fn sample_manifest(sanitized_size: u64, total_chunks: u32, length: u64) -> ArchiveManifest {
+    ArchiveManifest {
+        version: 1,
+        container_id: "00112233445566778899aabbccddeeff".into(),
+        created_at_unix: 0,
+        cover_object_id: Some("obj_0000".into()),
+        objects: vec![ManifestObject {
+            id: "obj_0000".into(),
+            original_name: "photo.jpg".into(),
+            mime_type: "image/jpeg".into(),
+            original_size: sanitized_size.max(1),
+            sanitized_size,
+            offset: HEADER_LEN as u64,
+            length,
+            chunk_size: 1024,
+            total_chunks,
+            is_cover: true,
+        }],
+    }
+}
+
+#[test]
+fn test_manifest_rejects_inconsistent_chunk_layout() {
+    // 2048 bytes in 1024-byte chunks is exactly two chunks.
+    let valid = sample_manifest(2048, 2, 2 * 40 + 2048);
+    valid.validate().unwrap();
+
+    let mut wrong_chunks = valid.clone();
+    wrong_chunks.objects[0].total_chunks = 1;
+    assert!(wrong_chunks.validate().is_err());
+
+    let mut wrong_length = valid.clone();
+    wrong_length.objects[0].length = 2048;
+    assert!(wrong_length.validate().is_err());
+
+    let mut oversized_plaintext = valid;
+    oversized_plaintext.objects[0].sanitized_size = 3 * 1024;
+    assert!(oversized_plaintext.validate().is_err());
+}
+
+#[test]
+fn test_manifest_rejects_absurd_sanitized_size_without_allocating() {
+    // A hostile manifest must be rejected from its chunk math alone; nothing
+    // here may attempt to allocate the declared size.
+    let manifest = sample_manifest(u64::MAX - 1, u32::MAX, u32::MAX as u64 * 40);
+    let json = manifest.to_json_bytes().unwrap();
+    assert!(ArchiveManifest::from_json_bytes(&json).is_err());
+}
+
+#[test]
+fn test_manifest_rejects_objects_outside_payload() {
+    let manifest = sample_manifest(2048, 2, 2 * 40 + 2048);
+    let start = HEADER_LEN as u64;
+    let end = start + manifest.objects[0].length;
+
+    manifest.validate_payload_bounds(start, end).unwrap();
+    assert!(manifest.validate_payload_bounds(start + 1, end).is_err());
+    assert!(manifest.validate_payload_bounds(start, end - 1).is_err());
+}

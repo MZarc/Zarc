@@ -1354,11 +1354,15 @@ fun MediaGrid(
             }
         }
 
-        val topEntry = entries.getOrNull(gridState.firstVisibleItemIndex)
-        val currentVisibleDate = when (topEntry) {
-            is GridEntry.DateHeader -> topEntry.dateText
-            is GridEntry.Media -> formatDateHeader(topEntry.item.takenAt)
-            null -> ""
+        val currentVisibleDate by remember(entries) {
+            derivedStateOf {
+                val topEntry = entries.getOrNull(gridState.firstVisibleItemIndex)
+                when (topEntry) {
+                    is GridEntry.DateHeader -> topEntry.dateText
+                    is GridEntry.Media -> formatDateHeader(topEntry.item.takenAt)
+                    null -> ""
+                }
+            }
         }
         AnimatedVisibility(
             visible = showStickyDate && currentVisibleDate.isNotEmpty(),
@@ -1446,19 +1450,24 @@ fun MediaGrid(
             val usableHeightDp = (maxHeight - topInset - bottomInset - thumbHeightDp).coerceAtLeast(0.dp)
             val thumbOffsetDp = topInset + usableHeightDp * currentFraction
 
-            // Active date label: during drag, based on target; during normal scroll, based on top visible item
-            val activeItemIndex = if (isDraggingBar) {
-                (dragProgress * (totalItems - 1)).toInt().coerceIn(0, (totalItems - 1).coerceAtLeast(0))
-            } else {
-                gridState.firstVisibleItemIndex.coerceIn(0, (totalItems - 1).coerceAtLeast(0))
-            }
-
-            val activeDateLabel = remember(activeItemIndex, entries) {
-                val entry = entries.getOrNull(activeItemIndex)
-                when (entry) {
-                    is GridEntry.DateHeader -> entry.dateText
-                    is GridEntry.Media -> formatDateHeader(entry.item.takenAt)
-                    null -> ""
+            // Active date label: during drag, based on target; during normal
+            // scroll, based on the top visible item. Both sources change on
+            // every scroll frame, so the label is derived instead of read
+            // directly in composition.
+            val activeDateLabel by remember(entries, totalItems) {
+                derivedStateOf {
+                    val activeItemIndex = if (isDraggingBar) {
+                        (dragProgress * (totalItems - 1)).toInt()
+                            .coerceIn(0, (totalItems - 1).coerceAtLeast(0))
+                    } else {
+                        gridState.firstVisibleItemIndex
+                            .coerceIn(0, (totalItems - 1).coerceAtLeast(0))
+                    }
+                    when (val entry = entries.getOrNull(activeItemIndex)) {
+                        is GridEntry.DateHeader -> entry.dateText
+                        is GridEntry.Media -> formatDateHeader(entry.item.takenAt)
+                        null -> ""
+                    }
                 }
             }
 
@@ -1869,8 +1878,16 @@ fun PrivateScreen(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 textAlign = androidx.compose.ui.text.style.TextAlign.Center,
             )
+            Spacer(Modifier.height(8.dp))
+            Text(
+                text = "This vault is bound to your device's biometrics. " +
+                    "Removing every biometric or resetting the device makes it unrecoverable.",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.error,
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+            )
             Spacer(Modifier.height(24.dp))
-            Button(onClick = { viewModel.enablePrivateArea() }) {
+            Button(onClick = onUnlock) {
                 Icon(ZarcIcons.Shield, contentDescription = null)
                 Spacer(Modifier.width(8.dp))
                 Text("Set up Private Vault")
@@ -2371,8 +2388,17 @@ internal fun ZarcSheet(
                 content()
             }
 
-            // Right edge scrollbar thumb when content is scrollable
-            if (scrollState.maxValue > 0) {
+            // Right edge scrollbar thumb when content is scrollable. The
+            // scroll position changes on every frame, so the fraction is
+            // derived instead of read directly in composition.
+            val scrollbarFraction by remember {
+                derivedStateOf {
+                    if (scrollState.maxValue <= 0) null
+                    else (scrollState.value.toFloat() / scrollState.maxValue.toFloat())
+                        .coerceIn(0f, 1f)
+                }
+            }
+            if (scrollbarFraction != null) {
                 BoxWithConstraints(
                     modifier = Modifier
                         .align(Alignment.TopEnd)
@@ -2382,8 +2408,7 @@ internal fun ZarcSheet(
                     val trackHeight = maxHeight
                     val thumbHeight = 36.dp
                     val usableHeight = (trackHeight - thumbHeight).coerceAtLeast(0.dp)
-                    val fraction = (scrollState.value.toFloat() / scrollState.maxValue.toFloat()).coerceIn(0f, 1f)
-                    val thumbOffset = usableHeight * fraction
+                    val thumbOffset = usableHeight * (scrollbarFraction ?: 0f)
 
                     Box(
                         modifier = Modifier

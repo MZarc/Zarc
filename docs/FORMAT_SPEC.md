@@ -24,23 +24,25 @@ Under this architecture:
 |  SOF0 / DQT / DHT / SOS image data ... (EXIF/GPS/APPn stripped)          |
 |  zarc_offset - 2: EOI (0xFF, 0xD9)                                      |
 +=========================================================================+
-|                  ZARC CONTAINER HEADER (112 Bytes)                      |
+|                  ZARC CONTAINER HEADER (128 Bytes)                      |
 |  zarc_offset + 0x00:  Magic "ZARC" (4B, [0x5A, 0x41, 0x52, 0x43])        |
 |  zarc_offset + 0x04:  Format Version (2B, uint16_le = 1)                 |
 |  zarc_offset + 0x06:  Container Flags (2B, FLAG_POLYGLOT_JPEG = 1)      |
 |  zarc_offset + 0x08:  Container ID (16B, random UUIDv4 bytes)            |
 |  zarc_offset + 0x18:  KDF Identifier (2B, uint16_le = 1 [Argon2id])      |
-|  zarc_offset + 0x1A:  Argon2id Iterations (4B, uint32_le = 3)            |
-|  zarc_offset + 0x1E:  Argon2id Memory KiB (4B, uint32_le = 65536)        |
-|  zarc_offset + 0x22:  Argon2id Salt (16B, cryptographically random)     |
-|  zarc_offset + 0x32:  Wrapped DEK Nonce (12B)                            |
-|  zarc_offset + 0x3E:  Wrapped DEK + Auth Tag (32B DEK + 16B Poly1305)   |
+|  zarc_offset + 0x1A:  Cipher Identifier (2B, uint16_le = 1 [XChaCha20])  |
+|  zarc_offset + 0x1C:  Argon2id Iterations (4B, uint32_le = 3)            |
+|  zarc_offset + 0x20:  Argon2id Memory KiB (4B, uint32_le = 65536)        |
+|  zarc_offset + 0x24:  Argon2id Salt (16B, cryptographically random)      |
+|  zarc_offset + 0x34:  Wrapped DEK Nonce (24B, XChaCha20 nonce)           |
+|  zarc_offset + 0x4C:  Wrapped DEK + Auth Tag (32B DEK + 16B Poly1305)    |
+|  zarc_offset + 0x7C:  Reserved (4B, zero)                                |
 +-------------------------------------------------------------------------+
 |                  ENCRYPTED CONTENT CHUNKS STREAM                        |
-|  Photo 1 (64 KiB chunks + 16B Poly1305 MAC tag per chunk)                |
-|  Photo 2 (64 KiB chunks + 16B Poly1305 MAC tag per chunk)                |
+|  Photo 1 (64 KiB chunks; 24B nonce + ciphertext + 16B tag per chunk)     |
+|  Photo 2 (64 KiB chunks; 24B nonce + ciphertext + 16B tag per chunk)     |
 |  ...                                                                    |
-|  Cover Photo (64 KiB chunks + 16B Poly1305 MAC tag per chunk)           |
+|  Cover Photo (64 KiB chunks; 24B nonce + ciphertext + 16B tag per chunk) |
 +-------------------------------------------------------------------------+
 |                  ENCRYPTED MANIFEST                                     |
 |  Nonce (12B) | Ciphertext (UTF-8 JSON) | Auth Tag (16B Poly1305)        |
@@ -56,7 +58,7 @@ Under this architecture:
 ```
 
 ### Standalone ZARC Layout (`.zarc`)
-In standalone mode (`FLAG_STANDALONE = 0`), `zarc_offset` is `0`. The container begins directly at byte `0` with the 112-byte header.
+In standalone mode (`FLAG_STANDALONE = 0`), `zarc_offset` is `0`. The container begins directly at byte `0` with the 128-byte header.
 
 ---
 
@@ -70,7 +72,7 @@ ZARC implements **deterministic $O(1)$ boundary locator validation**:
 2. **Footer Magic Check**: Verify bytes `[24..28]` match `b"CRAZ"`.
 3. **Boundary Invariants**:
    - `manifest_offset + manifest_len + 32 == file_len`
-   - `zarc_offset + 112 <= manifest_offset`
+   - `zarc_offset + 128 <= manifest_offset`
 4. **Mode Verification**:
    - If `flags & FLAG_POLYGLOT_JPEG != 0`:
      - Assert `zarc_offset >= 4` (must have room for SOI and EOI).

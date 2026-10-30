@@ -91,13 +91,14 @@ that does expose `KeyInfo`, the level is reported from the platform.
 * **Lifetime.** It exists in memory during one encryption or decryption and
   is zeroized when the key type is dropped.
 
-## Layer 4: the Private Vault subkey (`zarc.private.v1`)
+## Layer 4: the Private Vault subkey
 
-* **Derivation.** Derived dynamically from the Vault Master Key using native BLAKE2b/HKDF subkey derivation (`ZarcNative.nativeDeriveSubkey(vmk, "zarc.private.v1")`).
-* **Hardware Biometric Envelope.** In the Private area, this subkey is further sealed inside a hardware Keystore biometric envelope (`PrivateGate`, using `KeyProperties.PURPOSE_WRAP_KEY | KeyProperties.PURPOSE_ENCRYPT`).
-* **Authentication Gate.** Unlocking requires hardware biometric authentication (`BiometricPrompt` with `BIOMETRIC_STRONG | DEVICE_CREDENTIAL`).
-* **Write Separation.** Normal gallery objects can be transferred and encrypted into the Private Vault by temporarily deriving the subkey on an isolated thread, encrypting the payload and thumbnail, and zeroizing the memory buffer immediately without requiring pre-unlock.
-* **Auto-Locking Lifecycle.** Exiting the Private Vault immediately zeroes `unlockedPrivateKey`, discards cached bitmaps from `ViewerImageCache`, and purges transient decrypted preview files.
+* **Independent random key.** A private area created by the current app generates a random 256-bit subkey (`newPrivateSubkey`). It is unrelated to the Vault Master Key, so compromising the VMK alone does not expose the private media.
+* **Hardware biometric envelope.** The subkey is wrapped by an AES-256-GCM key in the Android Keystore (`PrivateGate`). The gate key is created with `setUserAuthenticationRequired(true)`, `setInvalidatedByBiometricEnrollment(false)` and `AUTH_BIOMETRIC_STRONG`. The wrapped blob on disk is `ZPG2` magic + a 12 byte IV + the GCM ciphertext and tag. The key deliberately survives adding a new fingerprint or face: the random subkey has no other wrapping, so invalidation on a routine enrollment change would permanently destroy the private media. Every use still requires a fresh strong biometric.
+* **Authentication gate.** The wrap/unwrap `Cipher` is handed to `BiometricPrompt` as a `CryptoObject`; `doFinal` only succeeds after the platform authorises the operation. Device-credential authentication cannot authorise a `CryptoObject`, so the private gate deliberately accepts strong biometrics only.
+* **Unlock required for writes.** Importing or moving objects into the private area requires an unlocked private subkey. The app never falls back to a key derived from the VMK for a write.
+* **Legacy migration.** Private areas created before the independent subkey used `nativeDeriveSubkey(vmk, "zarc.private.v1")`. On the first unlock the app wraps a fresh random subkey, writes the `vault/private/migrating` marker, migrates every object, the private index and the thumbnails, and only then removes the marker. The migration is idempotent; master-key rotation refuses to run while it is pending.
+* **Auto-locking lifecycle.** Leaving the foreground (`onStop`) zeroes `unlockedPrivateKey`, clears the thumbnail, viewer and archive memory caches, and deletes transient decrypted files. `FLAG_SECURE` is enabled for the whole app, so screenshots and unredacted recent-task snapshots are blocked.
 
 ## Key transitions
 
@@ -129,6 +130,8 @@ it.
 | The Keystore key cannot be recovered (`UnrecoverableKeyException`) | Reported as a `KeystoreFailure`; no fallback. |
 | StrongBox is advertised but unavailable | The key is generated without StrongBox; the report says so. |
 | The Keystore key and the wrapped VMK are both gone | The vault starts over with a *new* VMK. The old objects are unreadable unless a recovery envelope exists. |
+| A new biometric is enrolled | The private-area gate key is **not** invalidated; the private area remains reachable with the new biometric. This is deliberate: the random private subkey has no other wrapping. |
+| Every biometric is removed, or the secure lock screen is removed | The private-area gate key is invalidated by the platform: the private area is unrecoverable. Normal vault objects remain readable through the Keystore-bound VMK. |
 | The device is wiped, reset or replaced | The Keystore key and the wrapped VMK are gone: the vault is recoverable **only** with the recovery passphrase. |
 | The app data is cleared | Same as above. |
 
@@ -182,10 +185,20 @@ account system and a network permission, which the brief excludes.
 * The master key rotation is **idempotent**: an object that already unwraps
   with the new key is skipped, so an interrupted rotation can simply be
   repeated. The staged key is written before the rotation and committed after
-  it, and a pending rotation is finished on the next start.
+  it, and a pending rotation is finished before any vault access on the next
+  start.
+* The rotation covers **every** artifact: the normal objects, the recycle bin
+  objects, the sealed index, the sealed thumbnails and the binned thumbnails.
+  Objects keep their identity and content; only the wrapping of their data key
+  changes.
+* Rotation is refused while a recovery envelope exists, because the envelope is
+  bound to the current master key and can only be recreated with the user's
+  passphrase. Disable recovery, rotate, then enable recovery again. Rotation is
+  also refused while a legacy private-area migration is pending.
 * The object re-encryption verifies the object before it replaces it, and
   replaces it atomically, so a failed re-encryption leaves the old object
-  untouched.
+  untouched. It keeps the object's identity, so the index does not have to
+  change.
 
 See [ADR-0005](adr/ADR-0005-recovery-envelope-and-key-rotation.md).
 

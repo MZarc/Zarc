@@ -72,8 +72,38 @@ pub struct ObjectInfo {
     pub chunk_count: u64,
 }
 
+/// Outcome of a rotation that tolerates unreadable objects.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RotationReport {
+    /// Number of objects whose data key was re-wrapped.
+    pub rotated: usize,
+    /// Number of objects that already used the new master key.
+    pub already_rotated: usize,
+    /// Objects that could not be opened with either key and were left
+    /// untouched. They were already unreadable before the rotation.
+    pub unreadable: Vec<ObjectId>,
+}
+
 /// Name prefix of the temporary ciphertext objects.
 const TEMP_OBJECT_PREFIX: &str = ".zarc-tmp-";
+
+/// State of one object's data-key envelope while a rotation is prepared.
+enum ObjectKeyState {
+    /// The object already unwraps with the new master key.
+    AlreadyRotated,
+    /// The object unwraps with the old master key and can be re-wrapped.
+    NeedsRotation,
+    /// The object is truncated, malformed or wrapped under neither key.
+    Unreadable,
+}
+
+/// Whether an error describes an object that was already damaged.
+fn is_unreadable(error: &Error) -> bool {
+    matches!(
+        error,
+        Error::Format(_) | Error::Authentication(_) | Error::LengthMismatch { .. }
+    )
+}
 
 /// Name prefix of the staging plaintext files.
 const TEMP_STAGING_PREFIX: &str = ".zarc-stage-";
@@ -419,6 +449,110 @@ impl Vault {
             }
         }
         Ok(rotated)
+    }
+
+    /// Rotate the vault master key while tolerating already-damaged objects.
+    ///
+    /// This is the variant used by the application and by startup recovery.
+    /// Every object is classified first: it either already uses `new_vmk`,
+    /// can be re-wrapped from `old_vmk`, or cannot be opened with either key.
+    /// Unreadable objects were already damaged before the rotation; they are
+    /// left untouched and reported, so one bit-rotted file cannot block the
+    /// rotation of the rest of the vault (or a pending recovery).
+    ///
+    /// The old key must still open at least one object. If every object is
+    /// unreadable, the rotation is refused, because a wrong `old_vmk` would
+    /// otherwise silently commit a key that cannot open anything.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::Error`] for I/O failures, unsupported formats and for
+    /// a rotation where neither key opens any object. An object that is merely
+    /// truncated, tampered with or wrapped under an unknown key is reported in
+    /// [`RotationReport::unreadable`], not returned as an error.
+    pub fn rotate_master_key_resilient(
+        &self,
+        old_vmk: &VaultMasterKey,
+        new_vmk: &VaultMasterKey,
+    ) -> Result<RotationReport> {
+        let ids = self.list_objects()?;
+        let mut pending = Vec::new();
+        let mut already_rotated = 0usize;
+        let mut unreadable = Vec::new();
+
+        for id in &ids {
+            match self.classify_object_key(old_vmk, new_vmk, id) {
+                Ok(ObjectKeyState::NeedsRotation) => pending.push(*id),
+                Ok(ObjectKeyState::AlreadyRotated) => already_rotated += 1,
+                Ok(ObjectKeyState::Unreadable) => unreadable.push(*id),
+                Err(error) => return Err(error),
+            }
+        }
+
+        if pending.is_empty() && already_rotated == 0 && !unreadable.is_empty() {
+            return Err(Error::Authentication(
+                "the old vault master key does not open any object".into(),
+            ));
+        }
+
+        let mut rotated = 0usize;
+        for id in pending {
+            if self.rotate_object_key(old_vmk, new_vmk, &id)? {
+                rotated += 1;
+            }
+        }
+
+        Ok(RotationReport {
+            rotated,
+            already_rotated,
+            unreadable,
+        })
+    }
+
+    /// Classify one object without modifying it.
+    fn classify_object_key(
+        &self,
+        old_vmk: &VaultMasterKey,
+        new_vmk: &VaultMasterKey,
+        id: &ObjectId,
+    ) -> Result<ObjectKeyState> {
+        let path = self.object_path(id);
+        let mut input = File::open(&path)?;
+        let mut header_bytes = [0u8; HEADER_LEN];
+        if let Err(error) = fsutil::read_exact_or_truncated(&mut input, &mut header_bytes) {
+            return if is_unreadable(&error) {
+                Ok(ObjectKeyState::Unreadable)
+            } else {
+                Err(error)
+            };
+        }
+        let header = match Header::decode(&header_bytes) {
+            Ok(header) => header,
+            Err(error) => {
+                return if is_unreadable(&error) {
+                    Ok(ObjectKeyState::Unreadable)
+                } else {
+                    Err(error)
+                };
+            }
+        };
+        if header.object_id != *id {
+            return Ok(ObjectKeyState::Unreadable);
+        }
+
+        let current = WrappedDataKey {
+            nonce: header.envelope_nonce,
+            ciphertext: header.wrapped_dek.to_vec(),
+            mac: header.wrapped_dek_mac,
+        };
+        let aad = header.envelope_aad();
+        if crate::keywrap::unwrap_data_key(new_vmk, &current, &aad).is_ok() {
+            return Ok(ObjectKeyState::AlreadyRotated);
+        }
+        if crate::keywrap::unwrap_data_key(old_vmk, &current, &aad).is_ok() {
+            return Ok(ObjectKeyState::NeedsRotation);
+        }
+        Ok(ObjectKeyState::Unreadable)
     }
 
     /// Re-wrap the data key of a single object under a new vault master key.

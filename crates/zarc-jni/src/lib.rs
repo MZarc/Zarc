@@ -16,9 +16,9 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
 
 use jni::objects::{JByteArray, JClass, JObjectArray, JString};
-use jni::sys::{jboolean, jbyteArray, jint, jobjectArray, jstring};
+use jni::sys::{jboolean, jbyteArray, jint, jintArray, jobjectArray, jstring};
 use jni::JNIEnv;
-use zeroize::Zeroize;
+use zeroize::Zeroizing;
 
 use zarc_core::archive::{self, ArchiveInputFile};
 use zarc_core::container::ObjectId;
@@ -55,12 +55,11 @@ pub extern "system" fn Java_com_zarc_vault_core_ZarcNative_nativeEncryptFile(
     objects_dir: JString,
 ) -> jstring {
     let result = catch_unwind(AssertUnwindSafe(|| {
-        let mut key_bytes = read_key(&mut env, &vault_master_key)?;
+        let key_bytes = Zeroizing::new(read_key(&mut env, &vault_master_key)?);
         let source = read_path(&mut env, &source_path)?;
         let objects = read_path(&mut env, &objects_dir)?;
         let vault = Vault::new(&objects).map_err(|e| e.to_string())?;
         let key = VaultMasterKey::from_slice(&key_bytes).map_err(|e| e.to_string())?;
-        key_bytes.zeroize();
         let encrypted = vault
             .encrypt_file(&key, &source)
             .map_err(|e| e.to_string())?;
@@ -81,7 +80,7 @@ pub extern "system" fn Java_com_zarc_vault_core_ZarcNative_nativeDecryptFile(
     destination_name: JString,
 ) -> jstring {
     let result = catch_unwind(AssertUnwindSafe(|| {
-        let mut key_bytes = read_key(&mut env, &vault_master_key)?;
+        let key_bytes = Zeroizing::new(read_key(&mut env, &vault_master_key)?);
         let id_text = read_string(&mut env, &object_id)?;
         let objects = read_path(&mut env, &objects_dir)?;
         let destination_dir = read_path(&mut env, &destination_dir)?;
@@ -89,7 +88,6 @@ pub extern "system" fn Java_com_zarc_vault_core_ZarcNative_nativeDecryptFile(
         let id = ObjectId::from_hex(&id_text).map_err(|e| e.to_string())?;
         let vault = Vault::new(&objects).map_err(|e| e.to_string())?;
         let key = VaultMasterKey::from_slice(&key_bytes).map_err(|e| e.to_string())?;
-        key_bytes.zeroize();
         let path = vault
             .decrypt_file(&key, &id, &destination_dir, &destination_name)
             .map_err(|e| e.to_string())?;
@@ -108,13 +106,12 @@ pub extern "system" fn Java_com_zarc_vault_core_ZarcNative_nativeVerifyObject(
     objects_dir: JString,
 ) -> jstring {
     let result = catch_unwind(AssertUnwindSafe(|| {
-        let mut key_bytes = read_key(&mut env, &vault_master_key)?;
+        let key_bytes = Zeroizing::new(read_key(&mut env, &vault_master_key)?);
         let id_text = read_string(&mut env, &object_id)?;
         let objects = read_path(&mut env, &objects_dir)?;
         let id = ObjectId::from_hex(&id_text).map_err(|e| e.to_string())?;
         let vault = Vault::new(&objects).map_err(|e| e.to_string())?;
         let key = VaultMasterKey::from_slice(&key_bytes).map_err(|e| e.to_string())?;
-        key_bytes.zeroize();
         let info = vault.verify_object(&key, &id).map_err(|e| e.to_string())?;
         Ok::<String, String>(format!(
             "id={} plaintext={} ciphertext={} container={} chunks={}",
@@ -175,13 +172,11 @@ pub extern "system" fn Java_com_zarc_vault_core_ZarcNative_nativeCreateRecoveryE
     passphrase: JByteArray,
 ) -> jbyteArray {
     let result = catch_unwind(AssertUnwindSafe(|| {
-        let mut key_bytes = read_key(&mut env, &vault_master_key)?;
-        let mut passphrase_bytes = read_key(&mut env, &passphrase)?;
+        let key_bytes = Zeroizing::new(read_key(&mut env, &vault_master_key)?);
+        let passphrase_bytes = Zeroizing::new(read_key(&mut env, &passphrase)?);
         let key = VaultMasterKey::from_slice(&key_bytes).map_err(|e| e.to_string())?;
-        key_bytes.zeroize();
         let envelope =
             RecoveryEnvelope::create(&key, &passphrase_bytes).map_err(|e| e.to_string())?;
-        passphrase_bytes.zeroize();
         let encoded = envelope.encode();
         env.byte_array_from_slice(&encoded)
             .map(|array| array.into_raw())
@@ -199,12 +194,10 @@ pub extern "system" fn Java_com_zarc_vault_core_ZarcNative_nativeOpenRecoveryEnv
     passphrase: JByteArray,
 ) -> jbyteArray {
     let result = catch_unwind(AssertUnwindSafe(|| {
-        let mut envelope_bytes = read_key(&mut env, &envelope)?;
-        let mut passphrase_bytes = read_key(&mut env, &passphrase)?;
+        let envelope_bytes = Zeroizing::new(read_key(&mut env, &envelope)?);
+        let passphrase_bytes = Zeroizing::new(read_key(&mut env, &passphrase)?);
         let parsed = RecoveryEnvelope::decode(&envelope_bytes).map_err(|e| e.to_string())?;
         let key = parsed.open(&passphrase_bytes).map_err(|e| e.to_string())?;
-        passphrase_bytes.zeroize();
-        envelope_bytes.zeroize();
         env.byte_array_from_slice(key.as_bytes())
             .map(|array| array.into_raw())
             .map_err(|e| e.to_string())
@@ -220,9 +213,8 @@ pub extern "system" fn Java_com_zarc_vault_core_ZarcNative_nativeCreateRecoveryW
     vault_master_key: JByteArray,
 ) -> jbyteArray {
     let result = catch_unwind(AssertUnwindSafe(|| {
-        let mut key_bytes = read_key(&mut env, &vault_master_key)?;
+        let key_bytes = Zeroizing::new(read_key(&mut env, &vault_master_key)?);
         let key = VaultMasterKey::from_slice(&key_bytes).map_err(|e| e.to_string())?;
-        key_bytes.zeroize();
         let witness = RecoveryWitness::create(&key).map_err(|e| e.to_string())?;
         env.byte_array_from_slice(&witness.encode())
             .map(|array| array.into_raw())
@@ -240,12 +232,10 @@ pub extern "system" fn Java_com_zarc_vault_core_ZarcNative_nativeVerifyRecoveryW
     vault_master_key: JByteArray,
 ) -> jboolean {
     let result = catch_unwind(AssertUnwindSafe(|| {
-        let mut witness_bytes = read_key(&mut env, &witness)?;
-        let mut key_bytes = read_key(&mut env, &vault_master_key)?;
+        let witness_bytes = Zeroizing::new(read_key(&mut env, &witness)?);
+        let key_bytes = Zeroizing::new(read_key(&mut env, &vault_master_key)?);
         let parsed = RecoveryWitness::decode(&witness_bytes).map_err(|e| e.to_string())?;
         let key = VaultMasterKey::from_slice(&key_bytes).map_err(|e| e.to_string())?;
-        key_bytes.zeroize();
-        witness_bytes.zeroize();
         Ok(parsed.verify(&key).is_ok())
     }));
     finish_bool(&mut env, result)
@@ -254,7 +244,10 @@ pub extern "system" fn Java_com_zarc_vault_core_ZarcNative_nativeVerifyRecoveryW
 /// Re-wrap every data key of the vault under a new vault master key.
 ///
 /// The content of the objects is not touched: only the key envelopes are
-/// replaced. Returns the number of objects that were re-wrapped.
+/// replaced. Objects that were already damaged before the rotation are left
+/// untouched instead of blocking the whole vault.
+///
+/// Returns a two-element array: `[rotated, unreadable]`.
 #[no_mangle]
 pub extern "system" fn Java_com_zarc_vault_core_ZarcNative_nativeRotateMasterKey(
     mut env: JNIEnv,
@@ -262,22 +255,29 @@ pub extern "system" fn Java_com_zarc_vault_core_ZarcNative_nativeRotateMasterKey
     old_vault_master_key: JByteArray,
     new_vault_master_key: JByteArray,
     objects_dir: JString,
-) -> jint {
+) -> jintArray {
     let result = catch_unwind(AssertUnwindSafe(|| {
-        let mut old_bytes = read_key(&mut env, &old_vault_master_key)?;
-        let mut new_bytes = read_key(&mut env, &new_vault_master_key)?;
+        let old_bytes = Zeroizing::new(read_key(&mut env, &old_vault_master_key)?);
+        let new_bytes = Zeroizing::new(read_key(&mut env, &new_vault_master_key)?);
         let objects = read_path(&mut env, &objects_dir)?;
         let old_key = VaultMasterKey::from_slice(&old_bytes).map_err(|e| e.to_string())?;
         let new_key = VaultMasterKey::from_slice(&new_bytes).map_err(|e| e.to_string())?;
-        old_bytes.zeroize();
-        new_bytes.zeroize();
         let vault = Vault::new(&objects).map_err(|e| e.to_string())?;
-        let rotated = vault
-            .rotate_master_key(&old_key, &new_key)
+        let report = vault
+            .rotate_master_key_resilient(&old_key, &new_key)
             .map_err(|e| e.to_string())?;
-        Ok(rotated as jint)
+        let counts = [
+            jint::try_from(report.rotated).unwrap_or(jint::MAX),
+            jint::try_from(report.unreadable.len()).unwrap_or(jint::MAX),
+        ];
+        let array = env
+            .new_int_array(2)
+            .map_err(|e| format!("JNI: cannot allocate the rotation report: {e}"))?;
+        env.set_int_array_region(&array, 0, &counts)
+            .map_err(|e| format!("JNI: cannot fill the rotation report: {e}"))?;
+        Ok(array.into_raw())
     }));
-    finish_int(&mut env, result)
+    finish_int_array(&mut env, result)
 }
 
 /// Re-encrypt an object with a fresh data key, keeping its identity.
@@ -290,12 +290,11 @@ pub extern "system" fn Java_com_zarc_vault_core_ZarcNative_nativeReencryptObject
     objects_dir: JString,
 ) -> jstring {
     let result = catch_unwind(AssertUnwindSafe(|| {
-        let mut key_bytes = read_key(&mut env, &vault_master_key)?;
+        let key_bytes = Zeroizing::new(read_key(&mut env, &vault_master_key)?);
         let id_text = read_string(&mut env, &object_id)?;
         let objects = read_path(&mut env, &objects_dir)?;
         let id = ObjectId::from_hex(&id_text).map_err(|e| e.to_string())?;
         let key = VaultMasterKey::from_slice(&key_bytes).map_err(|e| e.to_string())?;
-        key_bytes.zeroize();
         let vault = Vault::new(&objects).map_err(|e| e.to_string())?;
         let info = vault
             .reencrypt_object(&key, &id)
@@ -322,12 +321,10 @@ pub extern "system" fn Java_com_zarc_vault_core_ZarcNative_nativeSealBlob(
     plaintext: JByteArray,
 ) -> jbyteArray {
     let result = catch_unwind(AssertUnwindSafe(|| {
-        let mut key_bytes = read_key(&mut env, &vault_master_key)?;
-        let mut plain = read_key(&mut env, &plaintext)?;
+        let key_bytes = Zeroizing::new(read_key(&mut env, &vault_master_key)?);
+        let plain = Zeroizing::new(read_key(&mut env, &plaintext)?);
         let key = VaultMasterKey::from_slice(&key_bytes).map_err(|e| e.to_string())?;
-        key_bytes.zeroize();
         let sealed = zarc_core::keywrap::seal_blob(&key, &plain).map_err(|e| e.to_string())?;
-        plain.zeroize();
         env.byte_array_from_slice(&sealed)
             .map(|array| array.into_raw())
             .map_err(|e| e.to_string())
@@ -344,12 +341,10 @@ pub extern "system" fn Java_com_zarc_vault_core_ZarcNative_nativeOpenBlob(
     blob: JByteArray,
 ) -> jbyteArray {
     let result = catch_unwind(AssertUnwindSafe(|| {
-        let mut key_bytes = read_key(&mut env, &vault_master_key)?;
-        let mut sealed = read_key(&mut env, &blob)?;
+        let key_bytes = Zeroizing::new(read_key(&mut env, &vault_master_key)?);
+        let sealed = Zeroizing::new(read_key(&mut env, &blob)?);
         let key = VaultMasterKey::from_slice(&key_bytes).map_err(|e| e.to_string())?;
-        key_bytes.zeroize();
         let plain = zarc_core::keywrap::open_blob(&key, &sealed).map_err(|e| e.to_string())?;
-        sealed.zeroize();
         env.byte_array_from_slice(&plain)
             .map(|array| array.into_raw())
             .map_err(|e| e.to_string())
@@ -369,10 +364,9 @@ pub extern "system" fn Java_com_zarc_vault_core_ZarcNative_nativeDeriveSubkey(
     info: JString,
 ) -> jbyteArray {
     let result = catch_unwind(AssertUnwindSafe(|| {
-        let mut key_bytes = read_key(&mut env, &vault_master_key)?;
+        let key_bytes = Zeroizing::new(read_key(&mut env, &vault_master_key)?);
         let label = read_string(&mut env, &info)?;
         let key = VaultMasterKey::from_slice(&key_bytes).map_err(|e| e.to_string())?;
-        key_bytes.zeroize();
         let subkey =
             zarc_core::keywrap::derive_subkey(&key, label.as_bytes()).map_err(|e| e.to_string())?;
         env.byte_array_from_slice(&subkey)
@@ -396,7 +390,7 @@ pub extern "system" fn Java_com_zarc_vault_core_ZarcNative_nativeArchiveCreate(
 ) -> jstring {
     let result = catch_unwind(AssertUnwindSafe(|| {
         let out_path = read_path(&mut env, &archive_path)?;
-        let mut pass_bytes = read_key(&mut env, &passphrase)?;
+        let pass_bytes = Zeroizing::new(read_key(&mut env, &passphrase)?);
 
         let cover_bytes = if outer_cover_jpeg.as_raw().is_null() {
             None
@@ -412,20 +406,35 @@ pub extern "system" fn Java_com_zarc_vault_core_ZarcNative_nativeArchiveCreate(
         let sp_obj = unsafe { JObjectArray::from_raw(source_paths) };
         let dn_obj = unsafe { JObjectArray::from_raw(display_names) };
 
-        let num_files = env.get_array_length(&sp_obj).map_err(|e| format!("JNI source_paths length: {e}"))?;
-        let num_names = env.get_array_length(&dn_obj).map_err(|e| format!("JNI display_names length: {e}"))?;
+        let num_files = env
+            .get_array_length(&sp_obj)
+            .map_err(|e| format!("JNI source_paths length: {e}"))?;
+        let num_names = env
+            .get_array_length(&dn_obj)
+            .map_err(|e| format!("JNI display_names length: {e}"))?;
         if num_files != num_names {
             return Err("source_paths and display_names length mismatch".into());
         }
 
         let mut inputs = Vec::with_capacity(num_files as usize);
         for i in 0..num_files {
-            let p_elem = env.get_object_array_element(&sp_obj, i).map_err(|e| format!("JNI get elem {i}: {e}"))?;
-            let d_elem = env.get_object_array_element(&dn_obj, i).map_err(|e| format!("JNI get elem {i}: {e}"))?;
-            let p_str: JString = p_elem.into();
-            let d_str: JString = d_elem.into();
+            let p_elem = env
+                .get_object_array_element(&sp_obj, i)
+                .map_err(|e| format!("JNI get elem {i}: {e}"))?;
+            let d_elem = env
+                .get_object_array_element(&dn_obj, i)
+                .map_err(|e| format!("JNI get elem {i}: {e}"))?;
+            let p_str = JString::from(p_elem);
+            let d_str = JString::from(d_elem);
             let path = read_path(&mut env, &p_str)?;
             let display_name = read_string(&mut env, &d_str)?;
+            // Free both local references before the next iteration: two
+            // references per photo would exhaust the JNI local reference
+            // table at the 250-photo archive limit.
+            env.delete_local_ref(p_str)
+                .map_err(|e| format!("JNI release source path {i}: {e}"))?;
+            env.delete_local_ref(d_str)
+                .map_err(|e| format!("JNI release display name {i}: {e}"))?;
 
             inputs.push(ArchiveInputFile {
                 path,
@@ -443,7 +452,6 @@ pub extern "system" fn Java_com_zarc_vault_core_ZarcNative_nativeArchiveCreate(
             64 * 1024,
             None::<fn(f32, &str)>,
         );
-        pass_bytes.zeroize();
         res?;
 
         Ok::<String, String>(out_path.to_string_lossy().into_owned())
@@ -484,10 +492,9 @@ pub extern "system" fn Java_com_zarc_vault_core_ZarcNative_nativeArchiveReadMani
 ) -> jstring {
     let result = catch_unwind(AssertUnwindSafe(|| {
         let path = read_path(&mut env, &archive_path)?;
-        let mut pass_bytes = read_key(&mut env, &passphrase)?;
+        let pass_bytes = Zeroizing::new(read_key(&mut env, &passphrase)?);
 
         let unlocked = archive::unlock_archive(&path, &pass_bytes);
-        pass_bytes.zeroize();
         let unlocked = unlocked?;
 
         let json = serde_json::to_string(&unlocked.manifest)
@@ -512,10 +519,9 @@ pub extern "system" fn Java_com_zarc_vault_core_ZarcNative_nativeArchiveExtractE
         let path = read_path(&mut env, &archive_path)?;
         let dest = read_path(&mut env, &destination_path)?;
         let obj_id = read_string(&mut env, &object_id)?;
-        let mut pass_bytes = read_key(&mut env, &passphrase)?;
+        let pass_bytes = Zeroizing::new(read_key(&mut env, &passphrase)?);
 
         let unlocked = archive::unlock_archive(&path, &pass_bytes);
-        pass_bytes.zeroize();
         let unlocked = unlocked?;
 
         archive::extract_object_to_file(&unlocked, &obj_id, &dest)?;
@@ -537,14 +543,16 @@ pub extern "system" fn Java_com_zarc_vault_core_ZarcNative_nativeArchiveExtractA
     let result = catch_unwind(AssertUnwindSafe(|| {
         let path = read_path(&mut env, &archive_path)?;
         let dest_dir = read_path(&mut env, &destination_dir)?;
-        let mut pass_bytes = read_key(&mut env, &passphrase)?;
+        let pass_bytes = Zeroizing::new(read_key(&mut env, &passphrase)?);
 
         let unlocked = archive::unlock_archive(&path, &pass_bytes);
-        pass_bytes.zeroize();
         let unlocked = unlocked?;
 
         let extracted = archive::extract_all_to_dir(&unlocked, &dest_dir, None::<fn(f32, &str)>)?;
-        let paths: Vec<String> = extracted.into_iter().map(|p| p.to_string_lossy().into_owned()).collect();
+        let paths: Vec<String> = extracted
+            .into_iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
         let json = serde_json::to_string(&paths)
             .map_err(|e| format!("Failed to serialize paths to JSON: {e}"))?;
 
@@ -565,10 +573,9 @@ pub extern "system" fn Java_com_zarc_vault_core_ZarcNative_nativeArchiveExtractC
     let result = catch_unwind(AssertUnwindSafe(|| {
         let path = read_path(&mut env, &archive_path)?;
         let cache_file = read_path(&mut env, &cache_destination_file)?;
-        let mut pass_bytes = read_key(&mut env, &passphrase)?;
+        let pass_bytes = Zeroizing::new(read_key(&mut env, &passphrase)?);
 
         let unlocked = archive::unlock_archive(&path, &pass_bytes);
-        pass_bytes.zeroize();
         let unlocked = unlocked?;
 
         let cover_id = unlocked
@@ -603,17 +610,20 @@ fn finish_bytes(
     }
 }
 
-/// Turn an integer result into a Java integer.
-fn finish_int(env: &mut JNIEnv, result: std::thread::Result<Result<jint, String>>) -> jint {
+/// Turn an integer-array result into a Java integer array.
+fn finish_int_array(
+    env: &mut JNIEnv,
+    result: std::thread::Result<Result<jintArray, String>>,
+) -> jintArray {
     match result {
         Ok(Ok(value)) => value,
         Ok(Err(message)) => {
             throw(env, &message);
-            0
+            std::ptr::null_mut()
         }
         Err(panic) => {
             throw(env, &panic_message(panic));
-            0
+            std::ptr::null_mut()
         }
     }
 }

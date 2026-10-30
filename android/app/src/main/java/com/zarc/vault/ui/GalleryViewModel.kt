@@ -247,38 +247,54 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     val state: StateFlow<GalleryUiState> = _state.asStateFlow()
 
     init {
-        viewModelScope.launch(Dispatchers.IO) { repository.clearViewerCache() }
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching {
+                repository.vault.recoverPendingRotation()
+                repository.vault.purgeStaleTransientFiles()
+                repository.clearViewerCache()
+            }
+        }
         refresh()
     }
 
     /** Reload the index from the vault. Also automatically purges items in bin >= 30 days. */
     fun refresh() {
         viewModelScope.launch {
-            val current = _state.value
-            withContext(Dispatchers.IO) { repository.purgeExpiredBinnedItems() }
-            val index = withContext(Dispatchers.IO) { repository.loadIndex() }
-            val privateIndex = withContext(Dispatchers.IO) {
-                val key = repository.unlockedPrivateKey
-                if (current.privateUnlocked && key != null) {
-                    repository.loadPrivateIndex(key)
-                } else {
-                    current.privateIndex
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    val index = repository.loadIndexAndPurgeExpired()
+                    val key = repository.unlockedPrivateKey
+                    val privateIndex = if (key != null) repository.loadPrivateIndex(key) else null
+                    Triple(index, privateIndex, repository.hasPrivateArea())
                 }
             }
-            val privateAvailable = withContext(Dispatchers.IO) { repository.hasPrivateArea() }
-            _state.value = current.copy(
-                index = index,
-                privateIndex = privateIndex,
-                privateAvailable = privateAvailable,
-                viewerItem = current.viewerItem?.let { item ->
-                    if (item.isPrivate) privateIndex.find(item.id) else index.find(item.id)
-                },
-                splitItem = current.splitItem?.let { item ->
-                    if (item.isPrivate) privateIndex.find(item.id) else index.find(item.id)
-                },
-                albumId = current.albumId?.takeIf { id -> index.albums.any { it.id == id } },
-                selection = current.selection.filterTo(mutableSetOf()) { index.find(it) != null || privateIndex.find(it) != null },
-            )
+            result.onSuccess { (index, privateIndex, privateAvailable) ->
+                // Re-read the state after the IO work: the user may have
+                // switched tabs, opened a viewer or changed the selection
+                // while the index was loading.
+                val latest = _state.value
+                _state.value = latest.copy(
+                    index = index,
+                    privateIndex = when {
+                        !latest.privateUnlocked -> VaultIndex()
+                        privateIndex != null -> privateIndex
+                        else -> latest.privateIndex
+                    },
+                    privateAvailable = privateAvailable,
+                    viewerItem = latest.viewerItem?.let { item ->
+                        if (item.isPrivate) privateIndex?.find(item.id) else index.find(item.id)
+                    },
+                    splitItem = latest.splitItem?.let { item ->
+                        if (item.isPrivate) privateIndex?.find(item.id) else index.find(item.id)
+                    },
+                    albumId = latest.albumId?.takeIf { id -> index.albums.any { it.id == id } },
+                    selection = latest.selection.filterTo(mutableSetOf()) { id ->
+                        index.find(id) != null || privateIndex?.find(id) != null
+                    },
+                )
+            }.onFailure { error ->
+                message("the vault index could not be loaded: ${error.message}")
+            }
         }
     }
 
@@ -826,23 +842,18 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                 runCatching { repository.vault.rotateVaultMasterKey() }
             }
             _state.value = _state.value.copy(busy = false, busyMessage = null)
-            result.onSuccess { message("$it objects were re-wrapped under a new key") }
-                .onFailure { message("the rotation failed: ${it.message}") }
-        }
-    }
-
-    /** Set up the private area. */
-    fun enablePrivateArea() {
-        viewModelScope.launch {
-            _state.value = _state.value.copy(busy = true, busyMessage = "Setting up Private Vault...")
-            val result = withContext(Dispatchers.IO) {
-                runCatching { repository.enablePrivateArea() }
-            }
-            _state.value = _state.value.copy(busy = false, busyMessage = null)
             result.onSuccess {
+                val skipped = repository.vault.lastRotationSkipped
                 refresh()
-                message(if (it) "Private Vault is ready" else "Private Vault could not be enabled")
-            }.onFailure { message("Private Vault setup failed: ${it.message}") }
+                if (skipped > 0) {
+                    message(
+                        "$it objects were re-wrapped; $skipped damaged object(s) " +
+                            "were left untouched",
+                    )
+                } else {
+                    message("$it objects were re-wrapped under a new key")
+                }
+            }.onFailure { message("the rotation failed: ${it.message}") }
         }
     }
 
@@ -859,13 +870,28 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     /** Unlock the private area with the key that the biometric released. */
     fun onPrivateUnlocked(key: ByteArray) {
         viewModelScope.launch {
-            val index = withContext(Dispatchers.IO) { repository.loadPrivateIndex(key) }
-            repository.unlockedPrivateKey = key
-            _state.value = _state.value.copy(
-                privateIndex = index,
-                privateUnlocked = true,
-                tab = GalleryTab.PRIVATE,
-            )
+            _state.value = _state.value.copy(busy = true, busyMessage = "Unlocking Private Vault...")
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    // If a legacy private area was upgraded, finish moving its
+                    // objects to the independent subkey before showing it.
+                    repository.finishPrivateMigration(key)
+                    repository.loadPrivateIndex(key)
+                }
+            }
+            _state.value = _state.value.copy(busy = false, busyMessage = null)
+            result.onSuccess { index ->
+                repository.unlockedPrivateKey?.fill(0)
+                repository.unlockedPrivateKey = key
+                _state.value = _state.value.copy(
+                    privateIndex = index,
+                    privateUnlocked = true,
+                    tab = GalleryTab.PRIVATE,
+                )
+            }.onFailure { error ->
+                key.fill(0)
+                message("the private area could not be opened: ${error.message}")
+            }
         }
     }
 
@@ -875,13 +901,19 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         repository.unlockedPrivateKey = null
         ThumbnailCache.clear()
         ViewerImageCache.clear()
-        repository.clearViewerCache()
         _state.value = _state.value.copy(
             privateUnlocked = false,
             inPrivateBin = false,
             privateIndex = VaultIndex(),
             tab = if (_state.value.tab == GalleryTab.PRIVATE) GalleryTab.PHOTOS else _state.value.tab,
         )
+        // Deleting decrypted sessions and exports touches the disk; keep it off
+        // the main thread (onStop calls this).
+        viewModelScope.launch(Dispatchers.IO) {
+            ArchiveVaultSessionCache.trimAndClear()
+            repository.clearViewerCache()
+            runCatching { repository.purgeTransientExports() }
+        }
     }
 
     fun openPrivateBin() {

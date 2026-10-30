@@ -104,7 +104,8 @@ flowchart TD
 
     subgraph Memory ["Ephemeral Volatile Memory (Zeroized on Lock)"]
         VMK["Vault Master Key (VMK)<br/>256-bit CSPRNG · Ephemeral"]
-        PVK["Private Vault Subkey<br/>BLAKE2b Derived · Gated by BiometricPrompt"]
+        GATE["Auth-Bound Keystore Key<br/>AES-256-GCM · BIOMETRIC_STRONG"]
+        PVK["Private Vault Subkey<br/>Independent Random 256-bit"]
         DEK["Per-Object DEK<br/>256-bit Key per Media Item"]
     end
 
@@ -114,7 +115,7 @@ flowchart TD
     end
 
     KEK -->|"Unwraps at launch"| VMK
-    VMK -->|"Derives upon Biometric Success"| PVK
+    GATE -->|"Wraps on biometric unlock"| PVK
     VMK -->|"Encrypts Catalog"| INDEX
     VMK -->|"Wraps DEK (Main Vault)"| DEK
     PVK -->|"Wraps DEK (Private Vault)"| DEK
@@ -129,7 +130,7 @@ flowchart TD
 | **Chunking & Streaming** | 64 KiB Chunks with Poly1305 MAC | Incremental authentication tags (`TAG_MESSAGE` / `TAG_FINAL`) prevent truncation attacks |
 | **Key Wrapping** | `crypto_aead_xchacha20poly1305_ietf` | Authenticated envelope encryption with contextual Additional Authenticated Data (AAD) |
 | **Key Derivation (KDF)** | **Argon2id** | 64 MiB memory cost, 3 iterations, 4 parallel lanes for maximum password defense |
-| **Subkey Derivation** | BLAKE2b Subkey KDF | Dedicated domain-separated derivation (`zarc.private.v1`) for the Private Vault |
+| **Subkey Derivation** | BLAKE2b Subkey KDF | Legacy private areas only (`zarc.private.v1`); new private areas use an independent random subkey |
 | **Memory Sanitization** | Rust `zeroize` & JVM sweeps | Keys and sensitive plaintext buffers are explicitly overwritten with zeroes upon lock |
 
 ---
@@ -150,11 +151,11 @@ flowchart TD
 
 ### 3. Concealed Biometric Private Vault & Stealth PIN
 - **Zero-Trace Secret Entry**: Completely absent from standard navigation bars. Accessible solely via a **long-press directly on the title header text** (*"Photos"*, *"Videos"*, or *"All"*).
-- **Hardware Biometric Gate**: Unlocks via Android `BiometricPrompt` (Fingerprint, Face, or device lockscreen credential), unwrapping the private subkey in hardware.
+- **Hardware Biometric Gate**: Unlocks via Android `BiometricPrompt` with a strong-biometric `CryptoObject`; the private subkey is released only after the platform authorises the Keystore wrap/unwrap operation.
 - **Dynamic Time-Based App Stealth PIN**: Optional stealth launch lock requiring a dynamic mathematical time formula:
   $$\text{PIN} = \text{Current Minute } (MM) + \text{Reversed 24h Hour } (\text{rev}(HH))$$
   *(Example: at 14:09, Minute is `09`, Hour is `14` $\rightarrow$ reversed `41`, producing PIN `0941`)*.
-- **Instant Relock & Key Purge**: Minimizing or switching away from Zarc immediately zeroes the private keys in RAM and relocks the vault.
+- **Instant Relock & Key Purge**: Minimizing or switching away from Zarc immediately zeroes the private keys in RAM, clears every in-memory media cache, deletes decrypted archive sessions and relocks the vault. `FLAG_SECURE` blocks screenshots and recent-task previews app-wide.
 
 ### 4. 30-Day Encrypted Recycle Bin
 - **Retention Countdown**: Soft-deleted files track remaining retention days (`29d left`, `today`).

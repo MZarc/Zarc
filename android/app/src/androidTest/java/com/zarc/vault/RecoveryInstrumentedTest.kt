@@ -7,6 +7,7 @@ import com.zarc.vault.core.VaultRepository
 import com.zarc.vault.keystore.KeystoreFailure
 import com.zarc.vault.keystore.KeystoreKeyManager
 import java.io.File
+import java.security.SecureRandom
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -123,8 +124,64 @@ class RecoveryInstrumentedTest {
     }
 
     @Test
-    fun reencryptingAnObjectKeepsThePlaintext() {
-        val fixture = storeFixture("reencrypt.bin")
+    fun anInterruptedRotationIsFinishedBeforeTheVaultIsUsed() {
+        val fixture = storeFixture("interrupted.bin")
+        val objectId = repository.encrypt(fixture)
+        val digest = repository.sha256(fixture)
+
+        // Simulate a process death after the new key was staged but before the
+        // rotation ran: only the staged key exists.
+        val newKey = ByteArray(KeystoreKeyManager.VAULT_MASTER_KEY_BYTES)
+        SecureRandom().nextBytes(newKey)
+        try {
+            val staged = keystore.wrapVaultMasterKey(newKey)
+            repository.stagedKeyFile.parentFile?.mkdirs()
+            repository.stagedKeyFile.writeBytes(staged)
+        } finally {
+            newKey.fill(0)
+        }
+        assertTrue(repository.stagedKeyFile.exists())
+
+        // Any vault access finishes the rotation first.
+        val active = repository.vaultMasterKey()
+        active.fill(0)
+        assertFalse("the staged key must be committed", repository.stagedKeyFile.exists())
+
+        val restored = repository.decrypt(objectId, "interrupted.out")
+        assertEquals(digest, repository.sha256(restored))
+    }
+
+    @Test
+    fun aCorruptObjectDoesNotBlockRotation() {
+        val healthy = storeFixture("healthy.bin")
+        val healthyId = repository.encrypt(healthy)
+        val healthyDigest = repository.sha256(healthy)
+        val damagedId = repository.encrypt(storeFixture("damaged.bin"))
+
+        // Simulate bit rot in one object before the rotation starts.
+        val damagedFile = File(repository.objectsDir, damagedId)
+        val damagedBytes = damagedFile.readBytes()
+        damagedBytes[0] = (damagedBytes[0].toInt() xor 0xFF).toByte()
+        damagedFile.writeBytes(damagedBytes)
+
+        val rotated = repository.rotateVaultMasterKey()
+        assertEquals("the healthy object must still be re-wrapped", 1, rotated)
+        assertEquals(
+            "the already-damaged object must not block the rotation",
+            1,
+            repository.lastRotationSkipped,
+        )
+
+        // The healthy object is readable under the new key.
+        val restored = repository.decrypt(healthyId, "healthy.out")
+        assertEquals(healthyDigest, repository.sha256(restored))
+
+        // The damaged file was preserved, not deleted.
+        assertTrue(damagedFile.exists())
+    }
+
+    @Test
+    fun reencryptingAnObjectKeepsThePlaintext() {        val fixture = storeFixture("reencrypt.bin")
         val objectId = repository.encrypt(fixture)
         val digest = repository.sha256(fixture)
 

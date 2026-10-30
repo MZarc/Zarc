@@ -165,6 +165,109 @@ fn a_rotation_with_the_wrong_old_key_changes_nothing() {
 }
 
 #[test]
+fn a_corrupt_object_does_not_block_a_resilient_rotation() {
+    let temp = TempDir::new().unwrap();
+    let vault = Vault::new(temp.path().join("vault")).unwrap();
+    let vmk = VaultMasterKey::generate().unwrap();
+    let new_vmk = VaultMasterKey::generate().unwrap();
+    let ids = fill(&vault, &vmk, 3);
+
+    // Simulate bit rot in the header of the first object.
+    let corrupt = zarc_core::container::ObjectId::from_hex(&ids[0]).unwrap();
+    let corrupt_path = vault.object_path(&corrupt);
+    let mut damaged = std::fs::read(&corrupt_path).unwrap();
+    damaged[0] ^= 0xFF;
+    std::fs::write(&corrupt_path, &damaged).unwrap();
+
+    let report = vault.rotate_master_key_resilient(&vmk, &new_vmk).unwrap();
+    assert_eq!(report.rotated, 2);
+    assert_eq!(report.already_rotated, 0);
+    assert_eq!(report.unreadable, vec![corrupt]);
+
+    // The healthy objects moved to the new key.
+    for id in &ids[1..] {
+        let object = zarc_core::container::ObjectId::from_hex(id).unwrap();
+        assert!(vault
+            .decrypt_file(&new_vmk, &object, &temp.path().join("out"), "r.bin")
+            .is_ok());
+        assert!(vault
+            .decrypt_file(&vmk, &object, &temp.path().join("out"), "r.bin")
+            .is_err());
+    }
+
+    // The damaged file is preserved byte-for-byte.
+    assert_eq!(std::fs::read(&corrupt_path).unwrap(), damaged);
+}
+
+#[test]
+fn the_strict_rotation_refuses_a_corrupt_object() {
+    let temp = TempDir::new().unwrap();
+    let vault = Vault::new(temp.path().join("vault")).unwrap();
+    let vmk = VaultMasterKey::generate().unwrap();
+    let new_vmk = VaultMasterKey::generate().unwrap();
+    let ids = fill(&vault, &vmk, 1);
+
+    let corrupt = zarc_core::container::ObjectId::from_hex(&ids[0]).unwrap();
+    let corrupt_path = vault.object_path(&corrupt);
+    let mut damaged = std::fs::read(&corrupt_path).unwrap();
+    damaged[0] ^= 0xFF;
+    std::fs::write(&corrupt_path, &damaged).unwrap();
+
+    assert!(vault.rotate_master_key(&vmk, &new_vmk).is_err());
+    assert_eq!(std::fs::read(&corrupt_path).unwrap(), damaged);
+}
+
+#[test]
+fn a_resilient_rotation_refuses_a_wrong_old_key() {
+    let temp = TempDir::new().unwrap();
+    let vault = Vault::new(temp.path().join("vault")).unwrap();
+    let vmk = VaultMasterKey::generate().unwrap();
+    let wrong = VaultMasterKey::generate().unwrap();
+    let new_vmk = VaultMasterKey::generate().unwrap();
+    let ids = fill(&vault, &vmk, 2);
+
+    let before = std::fs::read(
+        vault.object_path(&zarc_core::container::ObjectId::from_hex(&ids[0]).unwrap()),
+    )
+    .unwrap();
+
+    // No object opens with the wrong key: the rotation must not commit.
+    assert!(vault.rotate_master_key_resilient(&wrong, &new_vmk).is_err());
+
+    let after = std::fs::read(
+        vault.object_path(&zarc_core::container::ObjectId::from_hex(&ids[0]).unwrap()),
+    )
+    .unwrap();
+    assert_eq!(
+        before, after,
+        "a refused rotation must not touch any object"
+    );
+}
+
+#[test]
+fn a_corrupt_object_does_not_block_finishing_a_rotation() {
+    let temp = TempDir::new().unwrap();
+    let vault = Vault::new(temp.path().join("vault")).unwrap();
+    let vmk = VaultMasterKey::generate().unwrap();
+    let new_vmk = VaultMasterKey::generate().unwrap();
+    let ids = fill(&vault, &vmk, 3);
+
+    // Every healthy object has moved to the new key, as after a crash between
+    // the object rotation and the commit of the staged key.
+    assert_eq!(vault.rotate_master_key(&vmk, &new_vmk).unwrap(), 3);
+    let corrupt = zarc_core::container::ObjectId::from_hex(&ids[0]).unwrap();
+    let corrupt_path = vault.object_path(&corrupt);
+    let mut damaged = std::fs::read(&corrupt_path).unwrap();
+    damaged[0] ^= 0xFF;
+    std::fs::write(&corrupt_path, &damaged).unwrap();
+
+    let report = vault.rotate_master_key_resilient(&vmk, &new_vmk).unwrap();
+    assert_eq!(report.rotated, 0);
+    assert_eq!(report.already_rotated, 2);
+    assert_eq!(report.unreadable, vec![corrupt]);
+}
+
+#[test]
 fn reencrypting_an_object_replaces_the_content_but_keeps_the_identity() {
     let temp = TempDir::new().unwrap();
     let vault = Vault::new(temp.path().join("vault")).unwrap();

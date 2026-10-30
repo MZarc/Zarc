@@ -52,6 +52,15 @@ object ThumbnailCache {
 
     /** Drop every cached bitmap. */
     fun clear() = cache.evictAll()
+
+    /** Reduce the cache under memory pressure. */
+    fun trim(level: Int) {
+        when {
+            level >= android.content.ComponentCallbacks2.TRIM_MEMORY_COMPLETE -> cache.evictAll()
+            level >= android.content.ComponentCallbacks2.TRIM_MEMORY_MODERATE -> cache.trimToSize(maxBytes / 4)
+            else -> cache.trimToSize(maxBytes / 2)
+        }
+    }
 }
 
 /**

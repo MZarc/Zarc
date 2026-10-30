@@ -1,8 +1,10 @@
 package com.zarc.vault.ui
 
+import android.content.ComponentCallbacks2
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
+import android.view.WindowManager
 import androidx.activity.compose.setContent
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -48,10 +50,15 @@ import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.lifecycleScope
 import com.zarc.vault.gallery.MediaItem
 import com.zarc.vault.gallery.PrivateGate
 import com.zarc.vault.ui.theme.ZarcTheme
 import java.io.File
+import javax.crypto.Cipher
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * The gallery activity.
@@ -65,6 +72,7 @@ class GalleryActivity : FragmentActivity() {
     private val viewModel: GalleryViewModel by viewModels()
 
     private var importingToPrivate = false
+    private var suppressPrivateRelock = false
     private var isAppUnlockedSession = false
     private var appLockedState by mutableStateOf(false)
     private var isAppInRecents by mutableStateOf(false)
@@ -73,6 +81,7 @@ class GalleryActivity : FragmentActivity() {
     private val pickVisualMediaLauncher = registerForActivityResult(
         ActivityResultContracts.PickMultipleVisualMedia(),
     ) { uris: List<Uri> ->
+        suppressPrivateRelock = false
         if (uris.isNotEmpty()) {
             viewModel.importMultiple(uris, isPrivate = importingToPrivate)
         }
@@ -82,6 +91,7 @@ class GalleryActivity : FragmentActivity() {
     private val openMultipleDocsLauncher = registerForActivityResult(
         ActivityResultContracts.OpenMultipleDocuments(),
     ) { uris: List<Uri> ->
+        suppressPrivateRelock = false
         if (uris.isNotEmpty()) {
             viewModel.importMultiple(uris, isPrivate = importingToPrivate)
         }
@@ -89,6 +99,9 @@ class GalleryActivity : FragmentActivity() {
 
     private fun launchPicker(isPrivate: Boolean) {
         importingToPrivate = isPrivate
+        // The picker moves the activity to the background; do not relock the
+        // private area while the user is choosing the files to import.
+        suppressPrivateRelock = isPrivate
         try {
             pickVisualMediaLauncher.launch(
                 PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo),
@@ -100,6 +113,12 @@ class GalleryActivity : FragmentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Prevent screenshots, screen recording and unredacted recents
+        // snapshots for every screen, including the normal gallery.
+        window.setFlags(
+            WindowManager.LayoutParams.FLAG_SECURE,
+            WindowManager.LayoutParams.FLAG_SECURE,
+        )
         setContent {
             ZarcTheme {
                 val state by viewModel.state.collectAsStateWithLifecycle()
@@ -299,8 +318,22 @@ class GalleryActivity : FragmentActivity() {
 
     override fun onStop() {
         super.onStop()
+        if (!suppressPrivateRelock) {
+            // The private area is relocked whenever the app leaves the
+            // foreground, even if the app-level lock is disabled.
+            viewModel.lockPrivateArea()
+        }
         if (viewModel.state.value.appLockEnabled || viewModel.state.value.stealthLockEnabled) {
             isAppUnlockedSession = false
+        }
+    }
+
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        if (level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) {
+            ThumbnailCache.trim(level)
+            ViewerImageCache.trim(level)
+            ArchiveVaultSessionCache.trim(level)
         }
     }
 
@@ -350,32 +383,42 @@ class GalleryActivity : FragmentActivity() {
      */
     private fun openWith(item: MediaItem) {
         val isPrivate = item.isPrivate
-        val file: File = viewModel.repository.exportForSharing(item, isPrivate)
-        val uri: Uri = FileProvider.getUriForFile(
-            this,
-            "$packageName.fileprovider",
-            file,
-        )
-        val view = Intent(Intent.ACTION_VIEW).apply {
-            setDataAndType(uri, item.mime)
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        // Decryption can take seconds for a large video; never block the main
+        // thread on it.
+        lifecycleScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching { viewModel.repository.exportForSharing(item, isPrivate) }
+            }
+            val file = result.getOrElse {
+                viewModel.message("the item could not be decrypted: ${it.message}")
+                return@launch
+            }
+            val uri: Uri = FileProvider.getUriForFile(
+                this@GalleryActivity,
+                "$packageName.fileprovider",
+                file,
+            )
+            val view = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, item.mime)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            val share = Intent(Intent.ACTION_SEND).apply {
+                putExtra(Intent.EXTRA_STREAM, uri)
+                type = item.mime
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            val chooser = Intent.createChooser(view, "Open with").apply {
+                putExtra(Intent.EXTRA_INITIAL_INTENTS, arrayOf(share))
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            runCatching { startActivity(chooser) }
+                .onFailure { viewModel.message("no application can open this file") }
         }
-        val share = Intent(Intent.ACTION_SEND).apply {
-            putExtra(Intent.EXTRA_STREAM, uri)
-            type = item.mime
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        }
-        val chooser = Intent.createChooser(view, "Open with").apply {
-            putExtra(Intent.EXTRA_INITIAL_INTENTS, arrayOf(share))
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        }
-        runCatching { startActivity(chooser) }
-            .onFailure { viewModel.message("no application can open this file") }
     }
 
     /**
-     * Ask the platform for a biometric (or device credential) authentication
-     * matching the system lock, then proceed to the Stealth PIN lock for double protection.
+     * Ask the platform for a biometric authentication, then release the
+     * private subkey with the authorised Keystore operation.
      */
     private fun unlockPrivateArea() {
         if (!lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)) return
@@ -385,27 +428,132 @@ class GalleryActivity : FragmentActivity() {
         }
         try {
             val gate = PrivateGate(this)
-            val privateGateFile = File(viewModel.repository.objectsDir.parentFile, "private/gate.bin")
-            if (!privateGateFile.exists()) {
-                val enabled = viewModel.repository.enablePrivateArea()
-                if (!enabled) {
-                    viewModel.message("The private area could not be initialized")
-                    return
+            if (!gate.ensureKey()) {
+                viewModel.message(
+                    "The private area requires an enrolled fingerprint or face; " +
+                        "the authentication-bound key could not be created",
+                )
+                return
+            }
+            val repository = viewModel.repository
+            val gateFile = File(repository.objectsDir.parentFile, "private/gate.bin")
+
+            if (!gateFile.exists()) {
+                if (repository.hasPrivateData() || repository.hasLegacyPrivateGate()) {
+                    migrateLegacyPrivateArea(gate)
+                } else {
+                    setUpPrivateArea(gate, gateFile)
                 }
-                viewModel.refresh()
+                return
             }
 
+            val wrapped = gateFile.readBytes()
+            if (gate.isCurrentFormat(wrapped)) {
+                val cipher = gate.beginUnwrap(wrapped)
+                promptPrivateKey(cipher, "Unlock Private Vault") { authorized ->
+                    val key = gate.finishUnwrap(authorized, wrapped)
+                    viewModel.onPrivateUnlocked(key)
+                }
+            } else {
+                migrateLegacyPrivateArea(gate)
+            }
+        } catch (t: Throwable) {
+            android.util.Log.e("Zarc", "unlockPrivateArea error", t)
+            viewModel.message("Error opening private area: ${t.message}")
+        }
+    }
+
+    /** Create the first private area with a fresh random subkey. */
+    private fun setUpPrivateArea(gate: PrivateGate, gateFile: File) {
+        val repository = viewModel.repository
+        val subkey = repository.newPrivateSubkey()
+        val cipher = gate.beginWrap()
+        promptPrivateKey(
+            cipher,
+            "Set up Private Vault",
+            onFailure = { subkey.fill(0) },
+        ) { authorized ->
+            try {
+                val wrapped = gate.finishWrap(authorized, subkey)
+                repository.savePrivateGate(wrapped)
+                viewModel.onPrivateUnlocked(subkey)
+            } catch (error: Exception) {
+                subkey.fill(0)
+                viewModel.message("The private area could not be set up: ${error.message}")
+            }
+        }
+    }
+
+    /**
+     * Upgrade a pre-v2 private area from the deterministic vault-derived
+     * subkey to an independent random subkey wrapped by the auth-bound key.
+     */
+    private fun migrateLegacyPrivateArea(gate: PrivateGate) {
+        val repository = viewModel.repository
+        val gateFile = File(repository.objectsDir.parentFile, "private/gate.bin")
+        val legacyFromGate = runCatching {
+            if (gateFile.exists()) {
+                val wrapped = gateFile.readBytes()
+                if (gate.isCurrentFormat(wrapped)) null else gate.unwrapLegacy(wrapped)
+            } else {
+                null
+            }
+        }.getOrNull()
+        val legacyKey = legacyFromGate ?: repository.legacyPrivateSubkey()
+        val newKey = repository.newPrivateSubkey()
+        val cipher = gate.beginWrap()
+        promptPrivateKey(
+            cipher,
+            "Upgrade Private Vault",
+            onFailure = {
+                legacyKey.fill(0)
+                newKey.fill(0)
+            },
+        ) { authorized ->
+            try {
+                val wrapped = gate.finishWrap(authorized, newKey)
+                repository.markPrivateMigration()
+                repository.savePrivateGate(wrapped)
+                // The view model finishes the object migration before it
+                // publishes the unlocked private index.
+                viewModel.onPrivateUnlocked(newKey)
+            } catch (error: Exception) {
+                newKey.fill(0)
+                viewModel.message("The private area could not be upgraded: ${error.message}")
+            } finally {
+                legacyKey.fill(0)
+            }
+        }
+    }
+
+    /**
+     * Show a strong-biometric prompt bound to [cipher].
+     *
+     * Device-credential authentication cannot authorise a `CryptoObject`, so
+     * the private gate deliberately requires biometrics.
+     */
+    private fun promptPrivateKey(
+        cipher: Cipher,
+        title: String,
+        onFailure: () -> Unit = {},
+        onSuccess: (Cipher) -> Unit,
+    ) {
+        if (!lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)) {
+            onFailure()
+            return
+        }
+        try {
             val prompt = BiometricPrompt(
                 this,
                 ContextCompat.getMainExecutor(this),
                 object : BiometricPrompt.AuthenticationCallback() {
                     override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
-                        try {
-                            val file = File(viewModel.repository.objectsDir.parentFile, "private/gate.bin")
-                            val key = gate.unwrap(file.readBytes())
-                            viewModel.onPrivateUnlocked(key)
-                        } catch (error: Exception) {
-                            viewModel.message("The private key could not be released: ${error.message}")
+                        val authorized = result.cryptoObject?.cipher
+                        if (authorized == null) {
+                            viewModel.message("The private key could not be released")
+                            onFailure()
+                        } else {
+                            onSuccess(authorized)
                         }
                     }
 
@@ -413,23 +561,22 @@ class GalleryActivity : FragmentActivity() {
                         if (code != BiometricPrompt.ERROR_USER_CANCELED && code != BiometricPrompt.ERROR_NEGATIVE_BUTTON) {
                             viewModel.message(message.toString())
                         }
+                        onFailure()
                     }
                 },
             )
 
             val info = BiometricPrompt.PromptInfo.Builder()
-                .setTitle("Unlock Private Vault")
-                .setSubtitle("Touch the fingerprint sensor or enter device lock PIN")
-                .setAllowedAuthenticators(
-                    BiometricManager.Authenticators.BIOMETRIC_STRONG or
-                    BiometricManager.Authenticators.DEVICE_CREDENTIAL,
-                )
+                .setTitle(title)
+                .setSubtitle("Touch the fingerprint sensor to release the private key")
+                .setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_STRONG)
+                .setNegativeButtonText("Cancel")
                 .build()
 
-            prompt.authenticate(info)
-        } catch (t: Throwable) {
-            android.util.Log.e("Zarc", "unlockPrivateArea error", t)
-            viewModel.message("Error opening private area: ${t.message}")
+            prompt.authenticate(info, BiometricPrompt.CryptoObject(cipher))
+        } catch (error: Exception) {
+            onFailure()
+            viewModel.message("The biometric prompt could not be started: ${error.message}")
         }
     }
 }

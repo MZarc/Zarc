@@ -11,6 +11,7 @@ import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -44,6 +45,7 @@ class GalleryInstrumentedTest {
         gallery.vault.exportDir.listFiles()?.forEach { it.delete() }
         val root = gallery.objectsDir.parentFile
         java.io.File(root, "index.bin").delete()
+        java.io.File(root, "index.bin.corrupt").delete()
         java.io.File(root, "thumbs").deleteRecursively()
         java.io.File(root, "bin").deleteRecursively()
     }
@@ -73,6 +75,29 @@ class GalleryInstrumentedTest {
             "the object must not contain a JPEG header",
             stored.size > 3 && stored[0] == 0xFF.toByte() && stored[1] == 0xD8.toByte(),
         )
+    }
+
+    @Test
+    fun aCorruptIndexIsQuarantinedAndNeverOverwritten() {
+        gallery.importSamples(1)
+        val indexFile = java.io.File(gallery.objectsDir.parentFile, "index.bin")
+        assertTrue(indexFile.exists())
+        val garbage = byteArrayOf(1, 2, 3, 4, 5)
+        indexFile.writeBytes(garbage)
+
+        // A damaged index must not take the gallery down; it loads empty and
+        // preserves the unreadable bytes.
+        val loaded = gallery.loadIndex()
+        assertTrue(loaded.visible.isEmpty())
+        val quarantine = java.io.File(indexFile.parentFile, "index.bin.corrupt")
+        assertTrue("the damaged index must be quarantined", quarantine.exists())
+        assertEquals(garbage.size, quarantine.readBytes().size)
+
+        // The live index must never be overwritten by a later save.
+        val failure = runCatching { gallery.saveIndex(loaded) }.exceptionOrNull()
+        assertTrue("saving over a damaged index must fail, got $failure", failure is java.io.IOException)
+        assertEquals(garbage.size, indexFile.readBytes().size)
+        assertEquals(1, indexFile.readBytes()[0].toInt())
     }
 
     @Test
@@ -137,8 +162,33 @@ class GalleryInstrumentedTest {
     }
 
     @Test
-    fun thePrivateSubkeyIsSeparateFromTheVaultKey() {
-        val vmk = gallery.vault.vaultMasterKey()
+    fun rotatingTheMasterKeyKeepsTheIndexBinAndThumbnailsReadable() {
+        gallery.vault.disableRecovery()
+        val ids = gallery.importSamples(2)
+        gallery.moveToBin(listOf(ids[0]))
+
+        val rotated = gallery.vault.rotateVaultMasterKey()
+        assertTrue("both the visible and the binned object must be re-wrapped", rotated >= 2)
+
+        val index = gallery.loadIndex()
+        assertEquals(1, index.visible.size)
+        assertEquals(1, index.deleted.size)
+
+        val visible = index.visible.first()
+        val thumbnail = gallery.readThumbnail(false, visible.id)
+        assertTrue("the thumbnail must reopen under the new key", thumbnail != null && thumbnail.isNotEmpty())
+        assertNotNull("the rotated object must still decode", gallery.decodeForViewer(visible, 512))
+
+        // The binned object and its binned thumbnail survived the rotation.
+        val binned = index.deleted.first()
+        gallery.restoreFromBin(listOf(binned.id))
+        val restored = gallery.loadIndex()
+        assertEquals(2, restored.visible.size)
+        assertNotNull("the restored object must still decode", gallery.decodeForViewer(restored.visible.first { it.id == binned.id }, 512))
+    }
+
+    @Test
+    fun thePrivateSubkeyIsSeparateFromTheVaultKey() {        val vmk = gallery.vault.vaultMasterKey()
         val subkey = ZarcNative.nativeDeriveSubkey(vmk, "zarc.private.v1")
         val other = ZarcNative.nativeDeriveSubkey(vmk, "zarc.other.v1")
         try {

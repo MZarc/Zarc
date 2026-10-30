@@ -1,6 +1,7 @@
 package com.zarc.vault.ui
 
 import android.app.Activity
+import android.content.ComponentCallbacks2
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
@@ -531,6 +532,11 @@ private fun CreateArchiveFlow(
     var builtTempFile by remember { mutableStateOf<File?>(null) }
     var pendingExportName by remember { mutableStateOf("") }
 
+    // A built container that was never saved must not survive the screen.
+    DisposableEffect(Unit) {
+        onDispose { builtTempFile?.delete() }
+    }
+
     val phonePhotoPicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickMultipleVisualMedia(maxItems = MAX_ARCHIVE_PHOTOS)
     ) { uris ->
@@ -599,6 +605,8 @@ private fun CreateArchiveFlow(
                 }
             }
         } else {
+            builtTempFile?.delete()
+            builtTempFile = null
             isBuilding = false
             buildProgress = null
         }
@@ -1992,6 +2000,14 @@ private fun ExtractArchiveFlow(
 
     var decryptedManifest by remember { mutableStateOf<ArchiveManifestData?>(null) }
 
+    // The inspection copy lives in the cache; remove it when the screen goes.
+    DisposableEffect(Unit) {
+        onDispose {
+            genuineCoverBitmap = null
+            targetFile?.delete()
+        }
+    }
+
     val passRequester = remember { BringIntoViewRequester() }
 
     // SAF Picker for selecting archive (.jpg or .zarc)
@@ -1999,6 +2015,9 @@ private fun ExtractArchiveFlow(
         contract = ActivityResultContracts.OpenDocument()
     ) { uri ->
         if (uri != null) {
+            // Remove the previous inspection copy before replacing it.
+            targetFile?.delete()
+            targetFile = null
             targetUri = uri
             val name = queryFileName(context, uri) ?: "Archive.jpg"
             val size = queryFileSize(context, uri)
@@ -2011,25 +2030,45 @@ private fun ExtractArchiveFlow(
 
             scope.launch {
                 val tempCacheFile = File(context.cacheDir, "inspect_${System.currentTimeMillis()}.tmp")
-                withContext(Dispatchers.IO) {
-                    context.contentResolver.openInputStream(uri)?.use { inStream ->
-                        FileOutputStream(tempCacheFile).use { outStream ->
-                            inStream.copyTo(outStream)
+                try {
+                    withContext(Dispatchers.IO) {
+                        context.contentResolver.openInputStream(uri)?.use { inStream ->
+                            FileOutputStream(tempCacheFile).use { outStream ->
+                                inStream.copyTo(outStream)
+                            }
                         }
                     }
-                }
-                targetFile = tempCacheFile
+                    targetFile = tempCacheFile
 
-                // Inspect for genuine outer cover JPEG without password
-                val coverRes = repository.readOuterCover(tempCacheFile)
-                coverRes.onSuccess { coverBytes ->
-                    if (coverBytes != null && coverBytes.isNotEmpty()) {
-                        isPolyglotJpeg = true
-                        genuineCoverBitmap = BitmapFactory.decodeByteArray(coverBytes, 0, coverBytes.size)
-                    } else {
-                        isPolyglotJpeg = false
-                        genuineCoverBitmap = null
+                    // Inspect for genuine outer cover JPEG without password
+                    val coverRes = repository.readOuterCover(tempCacheFile)
+                    coverRes.onSuccess { coverBytes ->
+                        if (coverBytes != null && coverBytes.isNotEmpty()) {
+                            isPolyglotJpeg = true
+                            // The carrier can be a full-size photo; decode it
+                            // sampled so a hostile or huge cover cannot cause
+                            // an out-of-memory crash.
+                            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                            BitmapFactory.decodeByteArray(coverBytes, 0, coverBytes.size, bounds)
+                            val options = BitmapFactory.Options().apply {
+                                inSampleSize = calculateInSampleSize(bounds.outWidth, bounds.outHeight, 2048)
+                                inPreferredConfig = Bitmap.Config.ARGB_8888
+                            }
+                            genuineCoverBitmap = BitmapFactory.decodeByteArray(
+                                coverBytes,
+                                0,
+                                coverBytes.size,
+                                options,
+                            )
+                        } else {
+                            isPolyglotJpeg = false
+                            genuineCoverBitmap = null
+                        }
                     }
+                } catch (error: Exception) {
+                    tempCacheFile.delete()
+                    if (targetFile == tempCacheFile) targetFile = null
+                    authError = "the archive could not be opened: ${error.message}"
                 }
             }
         }
@@ -2484,7 +2523,7 @@ private fun ExtractArchiveFlow(
  * Solves redundant Argon2id key derivation, eliminates concurrent temp file collisions,
  * and enables instant, buttery-smooth swiping across decrypted photos without reloading.
  */
-private class ArchiveSession(
+internal class ArchiveSession(
     val sessionDir: File,
     val archiveFile: File,
     val passphrase: String,
@@ -2499,6 +2538,8 @@ private class ArchiveSession(
     }
 
     suspend fun getDecryptedFile(objectId: String): Result<File> = withContext(Dispatchers.IO) {
+        // The cache may have been purged when the app left the foreground.
+        sessionDir.mkdirs()
         val target = File(sessionDir, "$objectId.bin")
         if (target.exists() && target.length() > 0) {
             return@withContext Result.success(target)
@@ -2512,8 +2553,12 @@ private class ArchiveSession(
             try {
                 val res = repository.extractSingleEntry(archiveFile, passphrase, objectId, tempExtract)
                 if (res.isSuccess && tempExtract.exists() && tempExtract.length() > 0) {
-                    tempExtract.renameTo(target)
-                    Result.success(target)
+                    if (tempExtract.renameTo(target)) {
+                        Result.success(target)
+                    } else {
+                        tempExtract.delete()
+                        Result.failure(java.io.IOException("the decrypted file could not be committed"))
+                    }
                 } else {
                     tempExtract.delete()
                     Result.failure(res.exceptionOrNull() ?: Exception("Decryption failed"))
@@ -2570,11 +2615,60 @@ private class ArchiveSession(
         return synchronized(memoryCache) { memoryCache.get(cacheKey) }
     }
 
-    fun cleanup() {
+    /** Drop decoded bitmaps while keeping the decrypted files on disk. */
+    fun clearMemory() {
         synchronized(memoryCache) {
             memoryCache.evictAll()
         }
+    }
+
+    /** Reduce the memory cache under memory pressure. */
+    fun trimMemory(level: Int) {
+        synchronized(memoryCache) {
+            when {
+                level >= ComponentCallbacks2.TRIM_MEMORY_COMPLETE -> memoryCache.evictAll()
+                level >= ComponentCallbacks2.TRIM_MEMORY_MODERATE ->
+                    memoryCache.trimToSize(16 * 1024 * 1024)
+                else -> memoryCache.trimToSize(32 * 1024 * 1024)
+            }
+        }
+    }
+
+    fun cleanup() {
+        clearMemory()
         sessionDir.deleteRecursively()
+    }
+}
+
+/**
+ * Registry of the archive viewers that currently hold decrypted material.
+ *
+ * The gallery locks the private area and clears transient plaintext whenever
+ * the app leaves the foreground. Without this registry a decrypted archive
+ * session would keep its plaintext cache in `cacheDir` until the viewer is
+ * disposed, which can be much later (or never, if the process is killed).
+ */
+internal object ArchiveVaultSessionCache {
+    private val sessions = ConcurrentHashMap<ArchiveSession, Boolean>()
+
+    fun register(session: ArchiveSession) {
+        sessions[session] = true
+    }
+
+    fun unregister(session: ArchiveSession) {
+        sessions.remove(session)
+    }
+
+    /** Reduce the memory caches of every live session under memory pressure. */
+    fun trim(level: Int) {
+        sessions.keys.forEach { it.trimMemory(level) }
+    }
+
+    /** Drop the memory caches and delete the decrypted files of every session. */
+    fun trimAndClear() {
+        val active = sessions.keys.toList()
+        sessions.clear()
+        active.forEach { it.cleanup() }
     }
 }
 
@@ -2603,7 +2697,9 @@ private fun DecryptedGalleryViewer(
     }
 
     DisposableEffect(session) {
+        ArchiveVaultSessionCache.register(session)
         onDispose {
+            ArchiveVaultSessionCache.unregister(session)
             session.cleanup()
         }
     }
@@ -2649,38 +2745,42 @@ private fun DecryptedGalleryViewer(
         if (treeUri != null) {
             isExtracting = true
             scope.launch {
-                val targetDir = DocumentFile.fromTreeUri(context, treeUri)
-                if (targetDir != null && targetDir.canWrite()) {
-                    var successCount = 0
-                    withContext(Dispatchers.IO) {
-                        // Determine objects to extract: if selecting, extract selected; else extract all
-                        val objectsToExtract = if (selectedObjectIds.isNotEmpty()) {
-                            manifest.objects.filter { selectedObjectIds.contains(it.id) }
-                        } else {
-                            manifest.objects
-                        }
+                try {
+                    val targetDir = DocumentFile.fromTreeUri(context, treeUri)
+                    if (targetDir != null && targetDir.canWrite()) {
+                        var successCount = 0
+                        withContext(Dispatchers.IO) {
+                            // Determine objects to extract: if selecting, extract selected; else extract all
+                            val objectsToExtract = if (selectedObjectIds.isNotEmpty()) {
+                                manifest.objects.filter { selectedObjectIds.contains(it.id) }
+                            } else {
+                                manifest.objects
+                            }
 
-                        for (obj in objectsToExtract) {
-                            val fileRes = session.getDecryptedFile(obj.id)
-                            if (fileRes.isSuccess) {
-                                val cachedFile = fileRes.getOrThrow()
-                                val mime = if (obj.originalName.endsWith(".png", ignoreCase = true)) "image/png" else "image/jpeg"
-                                val newDoc = targetDir.createFile(mime, obj.originalName)
-                                if (newDoc != null) {
-                                    context.contentResolver.openOutputStream(newDoc.uri)?.use { out ->
-                                        cachedFile.inputStream().use { it.copyTo(out) }
+                            for (obj in objectsToExtract) {
+                                val fileRes = session.getDecryptedFile(obj.id)
+                                if (fileRes.isSuccess) {
+                                    val cachedFile = fileRes.getOrThrow()
+                                    val mime = if (obj.originalName.endsWith(".png", ignoreCase = true)) "image/png" else "image/jpeg"
+                                    val newDoc = targetDir.createFile(mime, obj.originalName)
+                                    if (newDoc != null) {
+                                        context.contentResolver.openOutputStream(newDoc.uri)?.use { out ->
+                                            cachedFile.inputStream().use { it.copyTo(out) }
+                                        }
+                                        successCount++
                                     }
-                                    successCount++
                                 }
                             }
                         }
+                        selectedObjectIds.clear()
+                        Toast.makeText(context, "Successfully extracted $successCount photos!", Toast.LENGTH_LONG).show()
+                    } else {
+                        Toast.makeText(context, "Cannot write to selected directory", Toast.LENGTH_SHORT).show()
                     }
+                } catch (error: Exception) {
+                    Toast.makeText(context, "Extraction failed: ${error.message}", Toast.LENGTH_LONG).show()
+                } finally {
                     isExtracting = false
-                    selectedObjectIds.clear()
-                    Toast.makeText(context, "Successfully extracted $successCount photos!", Toast.LENGTH_LONG).show()
-                } else {
-                    isExtracting = false
-                    Toast.makeText(context, "Cannot write to selected directory", Toast.LENGTH_SHORT).show()
                 }
             }
         }
@@ -3343,7 +3443,7 @@ private fun DecryptedPhotoViewer(
                             value = currentObject.originalName
                         )
 
-                        val ext = currentObject.originalName.substringAfterLast('.', "").uppercase(Locale.getDefault())
+                        val ext = currentObject.originalName.substringAfterLast('.', "").uppercase(Locale.ROOT)
                         InfoPropertyRow(
                             label = "Format & MIME type",
                             value = if (ext.isNotEmpty()) "$ext Image (${currentObject.mimeType})" else currentObject.mimeType
@@ -3503,8 +3603,8 @@ private fun InfoPropertyRow(
 private fun DecryptedZoomableMedia(
     obj: ArchiveObject,
     session: ArchiveSession,
-    onSingleTap: () -> Unit = {},
     modifier: Modifier = Modifier,
+    onSingleTap: () -> Unit = {},
 ) {
     var scale by remember(obj.id) { mutableFloatStateOf(1f) }
     var offsetX by remember(obj.id) { mutableFloatStateOf(0f) }

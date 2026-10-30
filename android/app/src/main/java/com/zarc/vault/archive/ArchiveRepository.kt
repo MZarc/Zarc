@@ -128,14 +128,18 @@ class ArchiveRepository(private val context: Context) {
             }
 
             val passBytes = passphrase.toByteArray(Charsets.UTF_8)
-            ZarcNative.nativeArchiveCreate(
-                archivePath = outputFile.absolutePath,
-                sourcePaths = stagingPaths.toTypedArray(),
-                displayNames = names.toTypedArray(),
-                coverIndex = validCoverIndex,
-                passphrase = passBytes,
-                outerCoverJpeg = outerCoverBytes,
-            )
+            try {
+                ZarcNative.nativeArchiveCreate(
+                    archivePath = outputFile.absolutePath,
+                    sourcePaths = stagingPaths.toTypedArray(),
+                    displayNames = names.toTypedArray(),
+                    coverIndex = validCoverIndex,
+                    passphrase = passBytes,
+                    outerCoverJpeg = outerCoverBytes,
+                )
+            } finally {
+                passBytes.fill(0)
+            }
 
             Result.success(outputFile)
         } catch (e: Exception) {
@@ -184,10 +188,14 @@ class ArchiveRepository(private val context: Context) {
     ): Result<ArchiveManifestData> = withContext(Dispatchers.IO) {
         try {
             val passBytes = passphrase.toByteArray(Charsets.UTF_8)
-            val jsonStr = ZarcNative.nativeArchiveReadManifest(
-                archivePath = archiveFile.absolutePath,
-                passphrase = passBytes,
-            )
+            val jsonStr = try {
+                ZarcNative.nativeArchiveReadManifest(
+                    archivePath = archiveFile.absolutePath,
+                    passphrase = passBytes,
+                )
+            } finally {
+                passBytes.fill(0)
+            }
             val manifest = parseManifestJson(jsonStr)
             Result.success(manifest)
         } catch (e: Exception) {
@@ -202,11 +210,15 @@ class ArchiveRepository(private val context: Context) {
         try {
             val cacheFile = File(context.cacheDir, "cover_${archiveFile.nameWithoutExtension}.jpg")
             val passBytes = passphrase.toByteArray(Charsets.UTF_8)
-            ZarcNative.nativeArchiveExtractCoverThumbnail(
-                archivePath = archiveFile.absolutePath,
-                passphrase = passBytes,
-                cacheDestinationFile = cacheFile.absolutePath,
-            )
+            try {
+                ZarcNative.nativeArchiveExtractCoverThumbnail(
+                    archivePath = archiveFile.absolutePath,
+                    passphrase = passBytes,
+                    cacheDestinationFile = cacheFile.absolutePath,
+                )
+            } finally {
+                passBytes.fill(0)
+            }
             Result.success(cacheFile)
         } catch (e: Exception) {
             Result.failure(e)
@@ -221,12 +233,16 @@ class ArchiveRepository(private val context: Context) {
     ): Result<File> = withContext(Dispatchers.IO) {
         try {
             val passBytes = passphrase.toByteArray(Charsets.UTF_8)
-            ZarcNative.nativeArchiveExtractEntry(
-                archivePath = archiveFile.absolutePath,
-                passphrase = passBytes,
-                objectId = objectId,
-                destinationPath = destinationFile.absolutePath,
-            )
+            try {
+                ZarcNative.nativeArchiveExtractEntry(
+                    archivePath = archiveFile.absolutePath,
+                    passphrase = passBytes,
+                    objectId = objectId,
+                    destinationPath = destinationFile.absolutePath,
+                )
+            } finally {
+                passBytes.fill(0)
+            }
             Result.success(destinationFile)
         } catch (e: Exception) {
             Result.failure(e)
@@ -273,11 +289,15 @@ class ArchiveRepository(private val context: Context) {
         try {
             destinationDir.mkdirs()
             val passBytes = passphrase.toByteArray(Charsets.UTF_8)
-            val jsonArrStr = ZarcNative.nativeArchiveExtractAll(
-                archivePath = archiveFile.absolutePath,
-                passphrase = passBytes,
-                destinationDir = destinationDir.absolutePath,
-            )
+            val jsonArrStr = try {
+                ZarcNative.nativeArchiveExtractAll(
+                    archivePath = archiveFile.absolutePath,
+                    passphrase = passBytes,
+                    destinationDir = destinationDir.absolutePath,
+                )
+            } finally {
+                passBytes.fill(0)
+            }
             val jsonArr = JSONArray(jsonArrStr)
             val files = mutableListOf<File>()
             for (i in 0 until jsonArr.length()) {
